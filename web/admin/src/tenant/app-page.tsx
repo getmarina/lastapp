@@ -19,6 +19,7 @@ import { AppSettings } from "./app-settings";
 import { appStatus, hostOf } from "./app-status";
 import { tenantTabs } from "./navigation";
 import { createMicro } from "./forms";
+import { AppSource } from "./app-source";
 import type { TenantScreen } from "./screen";
 
 // An App: its header (tile, name, hosted address, status, launch) over its
@@ -67,9 +68,15 @@ export function AppPage({ t }: { t: TenantScreen }) {
                     })
                   }
                 >
-                  Development workspaces
+                  Customize
                 </Button>
               )}
+            {scoped("release.manage") && (
+              <AppSource
+                app={text(app.id)}
+                workspace={Boolean(app.workspace_id)}
+              />
+            )}
             {optText(app.active_release_id) && origin && (
               <LinkButton
                 href={origin + "/"}

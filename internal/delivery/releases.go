@@ -54,8 +54,8 @@ type Deployment struct {
 // The status names who started the deployment (the person; an agent acts for
 // one) and the release's name, so a status needs no further reads to display.
 const (
-	deploymentStatusColumns = "d.attempts,d.created_at,u.display_name AS deployed_by,d.error_message,d.failed_state,d.finished_at,d.id,d.release_id,rel.display_name AS release_name,r.display_name AS retried_by,d.revision,d.space_id,d.state,d.target_app_id,d.tenant_id"
-	deploymentStatusFrom    = " FROM release_deployments d JOIN app_releases rel ON rel.id=d.release_id JOIN users u ON u.id=d.created_by LEFT JOIN users r ON r.id=d.retried_by"
+	deploymentStatusColumns = "d.attempts,d.created_at,u.display_name AS deployed_by,d.error_message,d.failed_state,d.finished_at,d.id,COALESCE(d.release_id,'') AS release_id,COALESCE(rel.display_name,'') AS release_name,r.display_name AS retried_by,d.revision,d.space_id,d.state,COALESCE(d.target_app_id,'') AS target_app_id,d.tenant_id"
+	deploymentStatusFrom    = " FROM release_deployments d LEFT JOIN app_releases rel ON rel.id=d.release_id JOIN users u ON u.id=d.created_by LEFT JOIN users r ON r.id=d.retried_by"
 )
 
 func (v *Deployment) ScanFields() []any {
@@ -108,9 +108,10 @@ func (v *ReleaseItem) ScanFields() []any {
 }
 
 type deploymentPlan struct {
-	Snapshot spaceSnapshot     `json:"snapshot"`
-	BaseHash string            `json:"base_hash"`
-	Versions map[string]string `json:"versions"`
+	Audience []string           `json:"launch_roles,omitempty"`
+	Snapshot SpaceConfiguration `json:"snapshot"`
+	BaseHash string             `json:"base_hash"`
+	Versions map[string]string  `json:"versions"`
 }
 
 var (
@@ -194,12 +195,11 @@ func (s *Service) CreateRelease(ctx context.Context, actor op.Actor, app string,
 			}
 		}
 		production := remapSnapshot(base, ids)
-		snapshotJSON, _ := json.Marshal(production)
-		manifestJSON, _ := json.Marshal(in.Manifest)
-		if _, e = tx.ExecContext(ctx, "INSERT INTO app_releases(id,tenant_id,app_id,build_id,workspace_id,display_name,manifest_json,snapshot_json,snapshot_hash,created_by,base_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)", record, a.TenantID, a.ID, in.Build, ws.ID, in.Name, manifestJSON, snapshotJSON, snapshotContractHash(production), p.ID, ws.BaseHash); e != nil {
-			return e
+		hash, err := insertRelease(ctx, tx, record, a, ws.ID, ws.BaseHash, p.ID, in, production)
+		if err != nil {
+			return err
 		}
-		return op.AuditAs(ctx, tx, actor, a.TenantID, "release.created", "release", record, registry.Row{"build_id": in.Build, "snapshot_hash": snapshotContractHash(production)})
+		return op.AuditAs(ctx, tx, actor, a.TenantID, "release.created", "release", record, registry.Row{"build_id": in.Build, "snapshot_hash": hash})
 	})
 	if e != nil {
 		return Release{}, e
@@ -295,14 +295,7 @@ func (s *Service) PreviewRelease(ctx context.Context, actor op.Actor, release st
 		if snapshotContractHash(remapSnapshot(currentSnapshot, ids)) != rel.SnapshotHash {
 			return registry.Conflict("Workspace configuration changed after this release was captured. Capture and test a fresh release.")
 		}
-		access, e := registry.AccessOf(a.Access)
-		if e != nil {
-			return e
-		}
-		old := access.Origin
-		access.Origin = origin
-		b, _ := json.Marshal(access)
-		if _, e = tx.ExecContext(ctx, "UPDATE apps SET active_release_id=?,data_access_json=?,approved_origin=?,origin_host=NULL,origin_generation=origin_generation+IF(?<>?,1,0),revision=revision+1 WHERE id=?", rel.ID, b, origin, old, origin, a.ID); e != nil {
+		if e = selectPreview(ctx, tx, a, rel.ID, origin); e != nil {
 			return e
 		}
 		return op.AuditAs(ctx, tx, actor, a.TenantID, "release.preview_activated", "app", a.ID, registry.Row{"release_id": rel.ID})
@@ -348,6 +341,13 @@ func (s *Service) DeployRelease(ctx context.Context, actor op.Actor, release str
 	if e = s.deploymentAuthority(ctx, s.DB, p, res); e != nil {
 		return nil, e
 	}
+	var reserved int
+	if e = s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM package_stages WHERE workspace_id=?", rel.WorkspaceID).Scan(&reserved); e != nil {
+		return nil, e
+	}
+	if reserved > 0 {
+		return nil, registry.Conflict("Activate the reviewed package installation from Packages.")
+	}
 	if e = s.EnsureReleaseBuild(ctx, s.DB, rel.ID); e != nil {
 		return nil, e
 	}
@@ -380,7 +380,7 @@ func (s *Service) DeployRelease(ctx context.Context, actor op.Actor, release str
 		if entity.Hash(current) != rel.BaseHash {
 			return registry.Conflict("Production changed since this workspace was created. Create a fresh workspace and reconcile its configuration before deploying.")
 		}
-		var snap spaceSnapshot
+		var snap SpaceConfiguration
 		b, _ := json.Marshal(rel.Snapshot)
 		if json.Unmarshal(b, &snap) != nil || snapshotContractHash(snap) != rel.SnapshotHash {
 			return registry.Conflict("Release snapshot is invalid.")
@@ -464,4 +464,28 @@ func (s *Service) AppDeployment(ctx context.Context, actor op.Actor, app string)
 		deployment = vs[0]
 	}
 	return registry.Row{"deployment": deployment}, nil
+}
+
+func insertRelease(ctx context.Context, tx *sql.Tx, id string, app registry.AppRecord, workspace, base, creator string, in ReleaseCreateInput, config SpaceConfiguration) (string, error) {
+	snapshotJSON, _ := json.Marshal(config)
+	manifestJSON, _ := json.Marshal(in.Manifest)
+	hash := snapshotContractHash(config)
+	_, e := tx.ExecContext(ctx, "INSERT INTO app_releases(id,tenant_id,app_id,build_id,workspace_id,display_name,manifest_json,snapshot_json,snapshot_hash,created_by,base_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)", id, app.TenantID, app.ID, in.Build, workspace, in.Name, manifestJSON, snapshotJSON, hash, creator, base)
+	if e != nil {
+		return "", e
+	}
+	_, e = tx.ExecContext(ctx, "INSERT INTO release_sources(release_id,content_hash) SELECT ?,content_hash FROM build_sources WHERE build_id=?", id, in.Build)
+	return hash, e
+}
+
+func selectPreview(ctx context.Context, tx *sql.Tx, app registry.AppRecord, release, origin string) error {
+	policy, e := registry.AccessOf(app.Access)
+	if e != nil {
+		return e
+	}
+	previous := policy.Origin
+	policy.Origin = origin
+	b, _ := json.Marshal(policy)
+	_, e = tx.ExecContext(ctx, "UPDATE apps SET active_release_id=?,data_access_json=?,approved_origin=?,origin_host=NULL,origin_generation=origin_generation+IF(?<>?,1,0),revision=revision+1 WHERE id=?", release, b, origin, previous, origin, app.ID)
+	return e
 }

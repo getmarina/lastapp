@@ -404,6 +404,7 @@ POST /v1/apps/{app}/upload-tickets -> 201
   .limits.max_bytes number
   .limits.max_file_bytes number
   .limits.max_files number
+  .limits.max_source_bytes number
   .upload_token string
   .upload_url string
 POST /v1/apps/{app}/upload-tickets production -> 404
@@ -893,6 +894,7 @@ mcp lastapp_release upload_ticket -> 200
   .data.limits.max_bytes number
   .data.limits.max_file_bytes number
   .data.limits.max_files number
+  .data.limits.max_source_bytes number
   .data.upload_token string
   .data.upload_url string
   .ok bool

@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -72,6 +74,55 @@ func newReleaseFixture(t *testing.T) releaseFixture {
 	}
 	rel := c.want("POST", "/v1/apps/"+app+"/releases", delivery.ReleaseCreateInput{Name: "Private snapshot", Build: registry.Str(build["id"]), Manifest: delivery.ReleaseManifest{Microapps: map[string]string{}, Dependencies: map[string]string{}}}, 1, 200)
 	return releaseFixture{s, c, p, tenant, space, registry.Str(ws["id"]), registry.Str(ws["backing_space_id"]), app, productionApp, rel}
+}
+
+func TestUploadAdmissionAndRollback(t *testing.T) {
+	f := newReleaseFixture(t)
+	ctx := t.Context()
+	ticketPath := "/v1/apps/" + f.app + "/upload-tickets"
+	ticket := f.c.want("POST", ticketPath, registry.Row{}, 0, 201)
+	token := registry.Str(ticket["upload_token"])
+	upload, e := f.s.delivery.AuthorizeUpload(ctx, token)
+	if e != nil {
+		t.Fatal(e)
+	}
+	files := []artifact.File{{Path: "index.html", Content: []byte("<!doctype html><h1>Uncommitted fixture</h1>")}}
+	build, e := artifact.Inspect(files, "index.html")
+	if e != nil {
+		t.Fatal(e)
+	}
+	source := packageSourceArchive(t)
+	assertAbsent := func() {
+		t.Helper()
+		for _, path := range []string{build.Hash, filepath.Join("private-source", artifact.SourceHash(source))} {
+			if _, e := os.Lstat(filepath.Join(f.s.Config.ArtifactDirectory, path)); !errors.Is(e, os.ErrNotExist) {
+				t.Fatal("uncommitted artifact remains", path, e)
+			}
+		}
+	}
+	if _, e = f.s.DB.Exec(`CREATE TRIGGER fixture_reject_build BEFORE INSERT ON app_builds FOR EACH ROW
+		 SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT='Fixture storage commit failure'`); e != nil {
+		t.Fatal(e)
+	}
+	if _, _, e = f.s.delivery.StoreBuild(ctx, upload, files, build.Entry, registry.NewID(), source); e == nil {
+		t.Fatal("fixture should reject the upload transaction")
+	}
+	assertAbsent()
+	if _, e = f.s.DB.Exec("DROP TRIGGER fixture_reject_build"); e != nil {
+		t.Fatal(e)
+	}
+
+	for range registry.MaxAppBuilds - 1 {
+		if _, e = f.s.DB.Exec(`INSERT INTO app_builds(id,tenant_id,app_id,content_hash,files_json,entrypoint,size_bytes,created_by)
+			 SELECT ?,tenant_id,app_id,content_hash,files_json,entrypoint,size_bytes,created_by FROM app_builds WHERE id=?`, registry.NewID(), f.release["build_id"]); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if _, _, e = f.s.delivery.StoreBuild(ctx, upload, files, build.Entry, registry.NewID(), source); !isAPIStatus(e, 409) {
+		t.Fatal("locked upload admission should reject an exhausted build quota", e)
+	}
+	assertAbsent()
+	f.c.want("POST", ticketPath, registry.Row{}, 0, 409)
 }
 
 func TestReleaseWorkspaceOwnership(t *testing.T) {

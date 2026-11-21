@@ -24,12 +24,13 @@ type Credentials struct {
 }
 
 type DatabaseInput struct {
-	ID          string      `json:"id"`
-	Mode        string      `json:"management_mode"`
-	Layout      string      `json:"layout"`
-	Target      string      `json:"target_id"`
-	Database    string      `json:"database_name"`
-	Credentials Credentials `json:"credentials"`
+	ID             string      `json:"id"`
+	Mode           string      `json:"management_mode"`
+	Layout         string      `json:"layout"`
+	Target         string      `json:"target_id"`
+	Database       string      `json:"database_name"`
+	Credentials    Credentials `json:"credentials"`
+	PackagePreview bool        `json:"-"`
 }
 
 // Target is a database server registered by the platform.
@@ -332,43 +333,16 @@ func (v *Storage) Allocate(ctx context.Context, tx *sql.Tx, a op.Actor, tenant s
 			return e
 		}
 	}
-	if e := registry.LayoutAllowed(policy.Plan, in.Layout); e != nil {
+	if e := v.CheckAllocation(ctx, tx, tenant, in, policy, workspace); e != nil {
 		return e
-	}
-	if in.Mode != "managed" && in.Mode != "registered" {
-		return registry.Bad("Select managed or registered database mode.")
-	}
-	if !policy.AllowsMethod(in.Mode) {
-		return registry.Problem(403, "plan_restriction", "This database method is not included in the plan.")
-	}
-	if e := registry.Quota(ctx, tx, tenant, "database_resources", policy.MaxDatabases); e != nil {
-		return e
-	}
-	if e := pendingDatabaseQuota(ctx, tx, tenant); e != nil {
-		return e
-	}
-	var targetState string
-	var managed registry.Bit
-	e := registry.Lookup(ctx, tx, "SELECT state,managed_enabled FROM database_targets WHERE id=?", []any{in.Target}, &targetState, &managed)
-	if e != nil {
-		return e
-	}
-	if targetState != registry.StateActive {
-		return registry.Conflict("The database target is disabled.")
 	}
 	var ownership any
 	cred := in.Credentials
 	if in.Mode == "managed" {
-		if !managed {
-			return registry.Bad("Target does not support managed creation.")
-		}
 		in.Database = "la_" + strings.ReplaceAll(in.ID, "-", "")
 		cred = Credentials{Username: in.Database, Password: registry.Token(32), AccountHost: v.Config.RuntimeAccountHost}
-		if cred.AccountHost == "" {
-			return registry.Bad("Runtime database account host is not configured.")
-		}
 		b := make([]byte, 16)
-		if _, e = rand.Read(b); e != nil {
+		if _, e := rand.Read(b); e != nil {
 			return e
 		}
 		ownership = b
@@ -384,7 +358,7 @@ func (v *Storage) Allocate(ctx context.Context, tx *sql.Tx, a op.Actor, tenant s
 	if e != nil {
 		return e
 	}
-	_, e = tx.ExecContext(ctx, "INSERT INTO database_resources (id,tenant_id,target_id,database_name,management_mode,layout,runtime_credentials_enc,ownership_token) VALUES (?,?,?,?,?,?,?,?)", in.ID, tenant, in.Target, in.Database, in.Mode, in.Layout, enc, ownership)
+	_, e = tx.ExecContext(ctx, "INSERT INTO database_resources (id,tenant_id,target_id,database_name,management_mode,layout,runtime_credentials_enc,ownership_token,package_preview) VALUES (?,?,?,?,?,?,?,?,?)", in.ID, tenant, in.Target, in.Database, in.Mode, in.Layout, enc, ownership, in.PackagePreview)
 	if e != nil {
 		return e
 	}
@@ -394,6 +368,64 @@ func (v *Storage) Allocate(ctx context.Context, tx *sql.Tx, a op.Actor, tenant s
 		}
 	}
 	return op.AuditAs(ctx, tx, a, tenant, "database.requested", "database", in.ID, registry.Row{"management_mode": in.Mode, "layout": in.Layout})
+}
+
+// CheckAllocation checks storage capacity and target policy during planning and
+// repeats the same checks under the allocation transaction's Tenant lock.
+func (v *Storage) CheckAllocation(ctx context.Context, q registry.Queryer, tenant string, in DatabaseInput, policy registry.Policy, workspace *access.Resource) error {
+	if e := registry.LayoutAllowed(policy.Plan, in.Layout); e != nil {
+		return e
+	}
+	if in.Mode != "managed" && in.Mode != "registered" {
+		return registry.Bad("Select managed or registered database mode.")
+	}
+	if !policy.AllowsMethod(in.Mode) {
+		return registry.Problem(403, "plan_restriction", "This database method is not included in the plan.")
+	}
+	if e := allocationQuota(ctx, q, tenant, in, policy, workspace); e != nil {
+		return e
+	}
+	if e := pendingDatabaseQuota(ctx, q, tenant); e != nil {
+		return e
+	}
+	var targetState string
+	var managed registry.Bit
+	e := registry.Lookup(ctx, q, "SELECT state,managed_enabled FROM database_targets WHERE id=?", []any{in.Target}, &targetState, &managed)
+	if e != nil {
+		return e
+	}
+	if targetState != registry.StateActive {
+		return registry.Conflict("The database target is disabled.")
+	}
+	if in.Mode == "managed" {
+		if !managed {
+			return registry.Bad("Target does not support managed creation.")
+		}
+		if v.Config.RuntimeAccountHost == "" {
+			return registry.Bad("Runtime database account host is not configured.")
+		}
+	}
+	return nil
+}
+
+func allocationQuota(ctx context.Context, q registry.Queryer, tenant string, in DatabaseInput, policy registry.Policy, workspace *access.Resource) error {
+	if !in.PackagePreview {
+		return registry.Quota(ctx, q, tenant, "database_resources", policy.MaxDatabases)
+	}
+	if workspace == nil || workspace.Tenant != tenant || workspace.Space == "" || in.Mode != "managed" {
+		return registry.Bad("Package preview storage requires a managed workspace database.")
+	}
+	var n int
+	if e := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM development_workspaces w
+		 JOIN spaces sp ON sp.id=w.backing_space_id AND sp.tenant_id=w.tenant_id
+		 JOIN database_resources d ON d.id=sp.database_resource_id AND d.tenant_id=w.tenant_id
+		 WHERE w.tenant_id=? AND w.production_space_id=? AND d.package_preview=1 AND d.state<>'retired'`, tenant, workspace.Space).Scan(&n); e != nil {
+		return e
+	}
+	if n >= registry.MaxSpaceWorkspaces {
+		return registry.Conflict("The Space's package preview storage is full. Archive unused package workspaces and wait for cleanup.")
+	}
+	return nil
 }
 
 // CreateDatabase queues a managed allocation or registers an existing database.
@@ -429,12 +461,16 @@ func (v *Storage) changeDatabase(ctx context.Context, a op.Actor, tenant, record
 	e := v.Run.Mutate(ctx, a, "database.manage", access.Resource{Tenant: tenant}, func(tx *sql.Tx) error {
 		var current int64
 		var state, mode, target string
-		e := registry.Lookup(ctx, tx, "SELECT revision,state,management_mode,target_id FROM database_resources WHERE tenant_id=? AND id=? FOR UPDATE", []any{tenant, record}, &current, &state, &mode, &target)
+		var cleaning bool
+		e := registry.Lookup(ctx, tx, "SELECT revision,state,management_mode,target_id,preview_cleanup_at IS NOT NULL FROM database_resources WHERE tenant_id=? AND id=? FOR UPDATE", []any{tenant, record}, &current, &state, &mode, &target, &cleaning)
 		if e != nil {
 			return e
 		}
 		if e = op.CheckRevision(current, revision); e != nil {
 			return e
+		}
+		if cleaning {
+			return registry.Conflict("The archived package preview database is being reclaimed.")
 		}
 		if state == "provisioning" || state == "pending" || state == registry.StateRetired {
 			return registry.Conflict("Wait for provisioning to finish; retired resources cannot be changed.")
@@ -498,7 +534,8 @@ func (v *Storage) changeDatabase(ctx context.Context, a op.Actor, tenant, record
 
 func pendingDatabaseQuota(ctx context.Context, q registry.Queryer, tenant string) error {
 	var pending int
-	if e := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM database_resources WHERE tenant_id=? AND state IN ('pending','provisioning')", tenant).Scan(&pending); e != nil {
+	if e := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM database_resources
+		 WHERE tenant_id=? AND (state='provisioning' OR (state='pending' AND preview_cleanup_at IS NULL))`, tenant).Scan(&pending); e != nil {
 		return e
 	}
 	if pending >= 8 {

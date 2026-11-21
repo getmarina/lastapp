@@ -21,17 +21,17 @@ const (
 )
 
 // captured is a small production snapshot with one of each typed reference.
-func captured() spaceSnapshot {
+func captured() SpaceConfiguration {
 	d := entity.Templates()[0]
 	d.Fields = append(d.Fields, entity.Field{Key: "parent", Label: prodTarget, Type: "reference", Target: prodTarget})
 	d.Permissions = []entity.Permission{{Key: "read", Label: "Read", Operation: "read", Roles: []string{prodRole}}}
 	gate := entity.Gate{Permission: entity.PermissionID(prodEntity, "read"), Roles: []string{prodRole}}
-	return spaceSnapshot{
+	return SpaceConfiguration{
 		Revision:  7,
-		Entities:  []snapshotEntity{{Revision: 3, ID: prodEntity, State: registry.StateActive, Definition: d}},
-		Roles:     []snapshotRole{{Revision: 2, ID: prodRole, App: prodApp, Code: "reviewer", Name: prodRole, State: registry.StateActive}},
-		Apps:      []snapshotApp{{Revision: 4, ID: prodApp, Slug: "deals", Name: "Deals", State: registry.StateActive, Access: entity.AppAccess{Origin: "https://example.test", Ceiling: []entity.Gate{gate}, Restrictions: []entity.Gate{gate}}}},
-		Microapps: []snapshotMicroapp{{Revision: 5, ID: prodMicroapp, App: prodApp, Slug: "board", Name: "Board", Artifact: prodApp, Order: 1, State: registry.StateActive}},
+		Entities:  []ConfiguredEntity{{Revision: 3, ID: prodEntity, State: registry.StateActive, Definition: d}},
+		Roles:     []ConfiguredRole{{Revision: 2, ID: prodRole, App: prodApp, Code: "reviewer", Name: prodRole, State: registry.StateActive}},
+		Apps:      []ConfiguredApp{{Revision: 4, ID: prodApp, Slug: "deals", Name: "Deals", State: registry.StateActive, Access: entity.AppAccess{Origin: "https://example.test", Ceiling: []entity.Gate{gate}, Restrictions: []entity.Gate{gate}}}},
+		Microapps: []ConfiguredMicroapp{{Revision: 5, ID: prodMicroapp, App: prodApp, Slug: "board", Name: "Board", Artifact: prodApp, Order: 1, State: registry.StateActive}},
 	}
 }
 

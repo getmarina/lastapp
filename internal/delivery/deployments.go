@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -15,6 +16,7 @@ import (
 	"github.com/aantich/lastapp/internal/op"
 	"github.com/aantich/lastapp/internal/publisher"
 	"github.com/aantich/lastapp/internal/registry"
+	"github.com/aantich/lastapp/internal/roles"
 )
 
 // deploymentTask is a production deployment as its worker applies it, with
@@ -22,25 +24,27 @@ import (
 // authority its current attempt runs under: whoever last retried it, else
 // whoever queued it (AgentGrant is that attempt's delegation).
 type deploymentTask struct {
-	ID, TenantID, SpaceID, ReleaseID, TargetApp, CreatedBy, State, Resource string
-	AgentGrant                                                              string // empty for a person
-	AgentRevision                                                           int64
-	Plan                                                                    registry.JSONValue
+	ID, TenantID, SpaceID, ReleaseID, TargetApp, CreatedBy, State, Resource, Kind string
+	AgentGrant                                                                    string // empty for a person
+	AgentRevision                                                                 int64
+	Plan                                                                          registry.JSONValue
 }
 
 // deploymentTaskSQL selects a deploymentTask from release_deployments d; the
 // query continues with a WHERE clause.
-const deploymentTaskSQL = "SELECT d.id,d.tenant_id,d.space_id,d.release_id,d.target_app_id,COALESCE(d.retried_by,d.created_by),d.state,sp.database_resource_id,COALESCE(d.agent_grant_id,''),COALESCE(d.agent_grant_revision,0),d.plan_json FROM release_deployments d JOIN spaces sp ON sp.id=d.space_id"
+const deploymentTaskSQL = "SELECT d.id,d.tenant_id,d.space_id,COALESCE(d.release_id,''),COALESCE(d.target_app_id,''),COALESCE(d.retried_by,d.created_by),d.state,sp.database_resource_id,COALESCE(d.agent_grant_id,''),COALESCE(d.agent_grant_revision,0),d.plan_json,d.kind FROM release_deployments d JOIN spaces sp ON sp.id=d.space_id"
 
 func (v *deploymentTask) ScanFields() []any {
-	return []any{&v.ID, &v.TenantID, &v.SpaceID, &v.ReleaseID, &v.TargetApp, &v.CreatedBy, &v.State, &v.Resource, &v.AgentGrant, &v.AgentRevision, &v.Plan}
+	return []any{&v.ID, &v.TenantID, &v.SpaceID, &v.ReleaseID, &v.TargetApp, &v.CreatedBy, &v.State, &v.Resource, &v.AgentGrant, &v.AgentRevision, &v.Plan, &v.Kind}
 }
 
 func decodeDeployment(v registry.JSONValue) (deploymentPlan, error) {
 	var plan deploymentPlan
 	b, e := json.Marshal(v)
 	if e == nil {
-		e = json.Unmarshal(b, &plan)
+		d := json.NewDecoder(bytes.NewReader(b))
+		d.UseNumber()
+		e = d.Decode(&plan)
 	}
 	return plan, e
 }
@@ -122,7 +126,7 @@ func (s *Service) DeploymentJob(ctx context.Context, q registry.Queryer, after s
 		if e != nil {
 			return e
 		}
-		if v.State == "queued" {
+		if v.State == "queued" && v.ReleaseID != "" {
 			if e = s.EnsureReleaseBuild(attempt, q, v.ReleaseID); e != nil {
 				return e
 			}
@@ -148,7 +152,19 @@ func (s *Service) DeploymentJob(ctx context.Context, q registry.Queryer, after s
 			return tx.Commit()
 		}
 		if v.State == "preparing" {
-			defs, e := registry.ScanAll[entities.EntityDefinition](attempt, q, "SELECT "+entities.EntityColumns+" FROM entity_definitions WHERE space_id=? ORDER BY id", v.SpaceID)
+			var defs []entities.EntityDefinition
+			if v.Kind == "release" {
+				defs, e = registry.ScanAll[entities.EntityDefinition](attempt, q, "SELECT "+entities.EntityColumns+" FROM entity_definitions WHERE space_id=? ORDER BY id", v.SpaceID)
+			} else {
+				for _, d := range plan.Snapshot.Entities {
+					var def entities.EntityDefinition
+					def, e = registry.ScanOne[entities.EntityDefinition](attempt, q, "SELECT "+entities.EntityColumns+" FROM entity_definitions WHERE space_id=? AND id=?", v.SpaceID, d.ID)
+					if e != nil {
+						return e
+					}
+					defs = append(defs, def)
+				}
+			}
 			if e != nil {
 				return e
 			}
@@ -215,8 +231,10 @@ func (s *Service) DeploymentJob(ctx context.Context, q registry.Queryer, after s
 				return nil
 			}
 		}
-		if e = s.EnsureReleaseBuild(attempt, q, v.ReleaseID); e != nil {
-			return e
+		if v.ReleaseID != "" {
+			if e = s.EnsureReleaseBuild(attempt, q, v.ReleaseID); e != nil {
+				return e
+			}
 		}
 		tx, e := s.DB.BeginTx(attempt, nil)
 		if e != nil {
@@ -292,20 +310,36 @@ func (s *Service) DeploymentJob(ctx context.Context, q registry.Queryer, after s
 				return e
 			}
 		}
+		if v.Kind != "release" && v.TargetApp != "" {
+			if e = roles.AssignInitialManager(attempt, tx, op.Actor{Principal: p}, v.TenantID, v.SpaceID, v.TargetApp, p.ID); e != nil {
+				return e
+			}
+			for _, role := range plan.Audience {
+				if _, e = tx.ExecContext(attempt, "INSERT INTO package_app_audience(app_id,role_id) VALUES(?,?)", v.TargetApp, role); e != nil {
+					return e
+				}
+			}
+		}
 		// Only future releases use the updated base. Every existing release keeps
 		// its original immutable base hash, preventing accidental stale rollback.
-		currentBase, err := s.snapshot(attempt, tx, v.SpaceID)
-		if err != nil {
-			return err
-		}
-		baseJSON, _ := json.Marshal(currentBase)
-		if _, err = tx.ExecContext(attempt, "UPDATE development_workspaces ws JOIN app_releases rel ON rel.workspace_id=ws.id SET ws.base_hash=?,ws.base_json=?,ws.revision=ws.revision+1 WHERE rel.id=?", entity.Hash(currentBase), baseJSON, v.ReleaseID); err != nil {
-			return err
+		if v.Kind == "release" {
+			currentBase, err := s.snapshot(attempt, tx, v.SpaceID)
+			if err != nil {
+				return err
+			}
+			baseJSON, _ := json.Marshal(currentBase)
+			if _, err = tx.ExecContext(attempt, "UPDATE development_workspaces ws JOIN app_releases rel ON rel.workspace_id=ws.id SET ws.base_hash=?,ws.base_json=?,ws.revision=ws.revision+1 WHERE rel.id=?", entity.Hash(currentBase), baseJSON, v.ReleaseID); err != nil {
+				return err
+			}
 		}
 		if _, e = tx.ExecContext(attempt, "UPDATE release_deployments SET state='active',finished_at=UTC_TIMESTAMP(6),revision=revision+1 WHERE id=?", v.ID); e != nil {
 			return e
 		}
-		if e = op.Audit(attempt, tx, v.TenantID, p.ID, "release.deployed", "deployment", v.ID, registry.NewID(), registry.Row{"release_id": v.ReleaseID, "app_id": v.TargetApp}); e != nil {
+		event := "release.deployed"
+		if v.Kind != "release" {
+			event = "package.activated"
+		}
+		if e = op.Audit(attempt, tx, v.TenantID, p.ID, event, "deployment", v.ID, registry.NewID(), registry.Row{"release_id": v.ReleaseID, "app_id": v.TargetApp}); e != nil {
 			return e
 		}
 		return tx.Commit()
@@ -390,24 +424,41 @@ func (s *Service) failDeployment(ctx context.Context, job deploymentTask, messag
 // actor's authority (and delegation) then carries the new attempt, which the
 // audit trail attributes to them.
 func (s *Service) RetryDeployment(ctx context.Context, actor op.Actor, deployment string, revision int64) (registry.Row, error) {
+	return s.RetryReviewedDeployment(ctx, actor, deployment, revision, "", nil)
+}
+
+// RetryReviewedDeployment accepts an explicitly re-reviewed production base for
+// a package only. The package service supplies its contract revalidation.
+func (s *Service) RetryReviewedDeployment(ctx context.Context, actor op.Actor, deployment string, revision int64, reviewedBase string, validate func(context.Context, *sql.Tx, SpaceConfiguration) error) (registry.Row, error) {
 	p := actor.Principal
 	if revision < 1 {
 		return nil, op.RevisionRequired()
 	}
-	var releaseID string
+	var releaseID, targetApp, kind string
 	res := access.Resource{}
-	if e := registry.Lookup(ctx, s.DB, "SELECT release_id,tenant_id,space_id FROM release_deployments WHERE id=?", []any{deployment}, &releaseID, &res.Tenant, &res.Space); e != nil {
+	if e := registry.Lookup(ctx, s.DB, "SELECT COALESCE(release_id,''),COALESCE(target_app_id,''),tenant_id,space_id,kind FROM release_deployments WHERE id=?", []any{deployment}, &releaseID, &targetApp, &res.Tenant, &res.Space, &kind); e != nil {
 		return nil, e
 	}
-	rel, e := s.releaseRow(ctx, s.DB, p, releaseID)
-	if e != nil {
-		return nil, e
+	if kind != "release" && validate == nil {
+		return nil, registry.Conflict("Retry this operation from Packages.")
+	}
+
+	var rel Release
+	var e error
+	if kind == "release" {
+		rel, e = s.releaseRow(ctx, s.DB, p, releaseID)
+		if e != nil {
+			return nil, e
+		}
+		targetApp = rel.ProductionApp
 	}
 	if e = s.deploymentAuthority(ctx, s.DB, p, res); e != nil {
 		return nil, e
 	}
-	if e = s.EnsureReleaseBuild(ctx, s.DB, rel.ID); e != nil {
-		return nil, e
+	if releaseID != "" {
+		if e = s.EnsureReleaseBuild(ctx, s.DB, releaseID); e != nil {
+			return nil, e
+		}
 	}
 	var attempts int64
 	ctx = context.WithValue(ctx, access.DeploymentOperationKey{}, deployment)
@@ -425,21 +476,23 @@ func (s *Service) RetryDeployment(ctx context.Context, actor op.Actor, deploymen
 		if state != DeploymentFailed {
 			return registry.Conflict("Only a failed deployment can be retried.")
 		}
-		if failedBase == nil {
+		if failedBase == nil && kind == "release" {
 			return registry.Conflict("This deployment cannot be retried. Create a fresh workspace and deploy a new release.")
 		}
 		if e := s.deploymentAuthority(ctx, tx, p, res); e != nil {
 			return e
 		}
-		a, e := inventory.AppRow(ctx, tx, rel.ProductionApp)
-		if e != nil {
-			return e
-		}
-		if access.Deref(a.ActiveRelease) == rel.ID {
-			return registry.Conflict("This release is already active in production.")
+		if releaseID != "" {
+			a, e := inventory.AppRow(ctx, tx, targetApp)
+			if e != nil {
+				return e
+			}
+			if access.Deref(a.ActiveRelease) == releaseID {
+				return registry.Conflict("This release is already active in production.")
+			}
 		}
 		plan, e := decodeDeployment(stored)
-		if e != nil || snapshotContractHash(plan.Snapshot) != rel.SnapshotHash {
+		if e != nil || kind == "release" && snapshotContractHash(plan.Snapshot) != rel.SnapshotHash {
 			return registry.Conflict("Release snapshot is invalid.")
 		}
 		if e = s.retryReady(ctx, tx, res.Space, plan.Snapshot); e != nil {
@@ -449,10 +502,25 @@ func (s *Service) RetryDeployment(ctx context.Context, actor op.Actor, deploymen
 		if e != nil {
 			return e
 		}
-		if entity.Hash(now) != *failedBase {
-			return registry.Conflict("Production changed since this deployment failed. Create a fresh workspace and reconcile its configuration before deploying.")
+		base := entity.Hash(now)
+		if reviewedBase != "" && (kind == "release" || validate == nil || reviewedBase != base) {
+			return registry.Conflict("The retry review is stale. Review the current production configuration.")
 		}
-		if s.HostedOrigin(rel.ProductionApp) == "" {
+		if failedBase == nil || base != *failedBase {
+			if kind == "release" {
+				return registry.Conflict("Production changed since this deployment failed. Create a fresh workspace and reconcile its configuration before deploying.")
+			}
+			if reviewedBase == "" {
+				return registry.Conflict("Production changed since this deployment failed. Review the current configuration before retrying.")
+			}
+			plan.BaseHash = base
+		}
+		if validate != nil {
+			if e = validate(ctx, tx, now); e != nil {
+				return e
+			}
+		}
+		if releaseID != "" && s.HostedOrigin(targetApp) == "" {
 			return registry.Conflict("Configure the App hosting origin before deployment.")
 		}
 		if e = s.snapshotAppQuota(ctx, tx, res.Tenant, plan.Snapshot); e != nil {
@@ -473,7 +541,7 @@ func (s *Service) RetryDeployment(ctx context.Context, actor op.Actor, deploymen
 		if _, e = tx.ExecContext(ctx, "UPDATE release_deployments SET state='queued',failed_state=NULL,error_message=NULL,failed_base_hash=NULL,finished_at=NULL,plan_json=?,attempts=?,retried_by=?,agent_grant_id=?,agent_grant_revision=?,queued_at=UTC_TIMESTAMP(6),revision=revision+1 WHERE id=? AND state='failed'", pb, attempts, p.ID, agentID(p), grantRev, deployment); e != nil {
 			return e
 		}
-		return op.AuditAs(ctx, tx, actor, res.Tenant, "release.deployment_retried", "deployment", deployment, registry.Row{"release_id": rel.ID, "attempt": attempts})
+		return op.AuditAs(ctx, tx, actor, res.Tenant, "release.deployment_retried", "deployment", deployment, registry.Row{"release_id": releaseID, "attempt": attempts})
 	})
 	if e != nil {
 		return nil, e
@@ -495,7 +563,7 @@ func (v *stagedDraft) ScanFields() []any {
 // retryReady is ensureSnapshotReady for a retry: the failed attempt left the
 // drafts it staged, so an active entity's draft may be either its published
 // definition or the one the deployment captured, never anything else.
-func (s *Service) retryReady(ctx context.Context, q registry.Queryer, space string, snap spaceSnapshot) error {
+func (s *Service) retryReady(ctx context.Context, q registry.Queryer, space string, snap SpaceConfiguration) error {
 	staged := map[string]string{}
 	for _, d := range snap.Entities {
 		staged[d.ID] = entity.Hash(d.Definition)
@@ -517,7 +585,7 @@ func (s *Service) retryReady(ctx context.Context, q registry.Queryer, space stri
 	return nil
 }
 
-func (s *Service) applySnapshotMetadata(ctx context.Context, tx *sql.Tx, tenant, space string, snapshot spaceSnapshot, activate bool) error {
+func (s *Service) applySnapshotMetadata(ctx context.Context, tx *sql.Tx, tenant, space string, snapshot SpaceConfiguration, activate bool) error {
 	if e := s.snapshotAppQuota(ctx, tx, tenant, snapshot); e != nil {
 		return e
 	}

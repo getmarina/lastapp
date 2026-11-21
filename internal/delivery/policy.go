@@ -28,7 +28,7 @@ func Policy() registry.Row {
 	return registry.Row{"deployment_states": registry.Row{"steps": DeploymentSteps, "failed": DeploymentFailed}, "workspace_steps": WorkspaceSteps, "max_workspace_apps": registry.MaxWorkspaceApps, "max_release_microapps": registry.MaxReleaseMicroapps, "max_release_dependencies": registry.MaxReleaseDependencies, "max_snapshot_bytes": registry.MaxSpaceSnapshotBytes, "max_app_builds": registry.MaxAppBuilds, "max_app_releases": registry.MaxAppReleases, "max_owned_workspaces": registry.MaxOwnedWorkspaces, "max_space_workspaces": registry.MaxSpaceWorkspaces, "upload": artifact.Limits}
 }
 
-func (s *Service) snapshotAppQuota(ctx context.Context, q registry.Queryer, tenant string, snap spaceSnapshot) error {
+func (s *Service) snapshotAppQuota(ctx context.Context, q registry.Queryer, tenant string, snap SpaceConfiguration) error {
 	policy, e := registry.PolicyFor(ctx, q, tenant)
 	if e != nil {
 		return e

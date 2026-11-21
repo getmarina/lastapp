@@ -367,12 +367,8 @@ func (v *Authoring) CreateEntity(ctx context.Context, a op.Actor, space string, 
 	}
 	tenant := sp.Tenant
 	e = v.Run.Mutate(ctx, a, "entity.manage", sp, func(tx *sql.Tx) error {
-		var n int
-		if e := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM entity_definitions WHERE space_id=?", sp.Space).Scan(&n); e != nil {
+		if e := CheckSpaceCapacity(ctx, tx, sp.Space, 1); e != nil {
 			return e
-		}
-		if n >= 100 {
-			return registry.Conflict("Space entity limit reached.")
 		}
 		_, e := tx.ExecContext(ctx, "INSERT INTO entity_definitions(id,tenant_id,space_id,entity_key,label,draft_json) VALUES(?,?,?,?,?,?)", in.ID, sp.Tenant, sp.Space, in.Definition.Key, in.Definition.Label, b)
 		if e != nil {
@@ -1058,4 +1054,20 @@ func BusinessRecord(d entity.Definition, raw registry.Row) map[string]any {
 		out[k] = v
 	}
 	return out
+}
+
+// CheckSpaceCapacity applies the same definition limit to ordinary authoring
+// and bulk publication. Archived definitions still occupy their stable keys.
+func CheckSpaceCapacity(ctx context.Context, q registry.Queryer, space string, added int) error {
+	if added == 0 {
+		return nil
+	}
+	var count int
+	if e := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM entity_definitions WHERE space_id=?", space).Scan(&count); e != nil {
+		return e
+	}
+	if count+added > entity.MaxSpaceEntities {
+		return registry.Conflict("Space entity limit reached.")
+	}
+	return nil
 }

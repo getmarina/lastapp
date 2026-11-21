@@ -1,6 +1,7 @@
 package delivery
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -17,12 +18,14 @@ import (
 	"github.com/aantich/lastapp/internal/registry"
 )
 
-func remapSnapshot(base spaceSnapshot, ids map[string]string) spaceSnapshot {
+func remapSnapshot(base SpaceConfiguration, ids map[string]string) SpaceConfiguration {
 	// Only typed identity references are rewritten. Labels, formulas and arbitrary
 	// literal JSON are data; a UUID-looking string is not automatically a reference.
 	b, _ := json.Marshal(base)
-	var out spaceSnapshot
-	_ = json.Unmarshal(b, &out)
+	var out SpaceConfiguration
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	_ = d.Decode(&out)
 	remap := func(v string) string {
 		if n, ok := ids[v]; ok {
 			return n
@@ -34,30 +37,16 @@ func remapSnapshot(base spaceSnapshot, ids map[string]string) spaceSnapshot {
 		e := &out.Entities[i]
 		old := e.ID
 		e.ID = remap(e.ID)
-		for j := range e.Definition.Fields {
-			f := &e.Definition.Fields[j]
-			if f.Type == "reference" {
-				f.Target = remap(f.Target)
-			}
-		}
-		for j := range e.Definition.Permissions {
-			p := &e.Definition.Permissions[j]
+		for _, p := range e.Definition.Permissions {
 			permissions[entity.PermissionID(old, p.Key)] = entity.PermissionID(e.ID, p.Key)
-			for k := range p.Roles {
-				p.Roles[k] = remap(p.Roles[k])
-			}
 		}
+		e.Definition.RewriteReferences(remap, remap)
 	}
-	gates := func(gs []entity.Gate) {
-		for i := range gs {
-			g := &gs[i]
-			if p, ok := permissions[g.Permission]; ok {
-				g.Permission = p
-			}
-			for j := range g.Roles {
-				g.Roles[j] = remap(g.Roles[j])
-			}
+	remapPermission := func(id string) string {
+		if n := permissions[id]; n != "" {
+			return n
 		}
+		return id
 	}
 	for i := range out.Roles {
 		v := &out.Roles[i]
@@ -68,8 +57,7 @@ func remapSnapshot(base spaceSnapshot, ids map[string]string) spaceSnapshot {
 		v := &out.Apps[i]
 		v.ID = remap(v.ID)
 		v.Access.Origin = ""
-		gates(v.Access.Ceiling)
-		gates(v.Access.Restrictions)
+		v.Access.RewriteGateReferences(remapPermission, remap)
 	}
 	for i := range out.Microapps {
 		v := &out.Microapps[i]
@@ -79,7 +67,7 @@ func remapSnapshot(base spaceSnapshot, ids map[string]string) spaceSnapshot {
 	return out
 }
 
-func snapshotIDs(base spaceSnapshot) map[string]string {
+func snapshotIDs(base SpaceConfiguration) map[string]string {
 	ids := map[string]string{}
 	for _, v := range base.Entities {
 		ids[v.ID] = "entity"
@@ -96,7 +84,7 @@ func snapshotIDs(base spaceSnapshot) map[string]string {
 	return ids
 }
 
-func (s *Service) installSnapshot(ctx context.Context, tx *sql.Tx, base spaceSnapshot, tenant, space, workspace string) error {
+func (s *Service) installSnapshot(ctx context.Context, tx *sql.Tx, base SpaceConfiguration, tenant, space, workspace string) error {
 	if len(base.Apps) > registry.MaxWorkspaceApps {
 		return registry.Conflict("Space exceeds the workspace App limit.")
 	}
@@ -412,10 +400,12 @@ func (s *Service) workspaceStep(ctx context.Context, q registry.Queryer, v regis
 	return e
 }
 
-func snapshotContractHash(v spaceSnapshot) string {
+func snapshotContractHash(v SpaceConfiguration) string {
 	b, _ := json.Marshal(v)
-	var copy spaceSnapshot
-	_ = json.Unmarshal(b, &copy)
+	var copy SpaceConfiguration
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber()
+	_ = d.Decode(&copy)
 	copy.Revision = 0
 	for i := range copy.Entities {
 		copy.Entities[i].Revision = 0

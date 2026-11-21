@@ -23,7 +23,7 @@ const (
 	MaxBody      = 24 << 20
 )
 
-var Limits = map[string]int{"max_bytes": MaxBytes, "max_file_bytes": MaxFileBytes, "max_files": MaxFiles, "max_body_bytes": MaxBody}
+var Limits = map[string]int{"max_bytes": MaxBytes, "max_file_bytes": MaxFileBytes, "max_files": MaxFiles, "max_body_bytes": MaxBody, "max_source_bytes": SourceLimit}
 
 type File struct {
 	Path    string `json:"path"`

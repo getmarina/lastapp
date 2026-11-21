@@ -21,6 +21,7 @@ import (
 
 	"github.com/aantich/lastapp/internal/access"
 	"github.com/aantich/lastapp/internal/agent"
+	"github.com/aantich/lastapp/internal/apppackages"
 	"github.com/aantich/lastapp/internal/config"
 	"github.com/aantich/lastapp/internal/dataapi"
 	"github.com/aantich/lastapp/internal/databases"
@@ -67,6 +68,7 @@ type Server struct {
 	dataAPI         *dataapi.Runtime
 	delivery        *delivery.Service
 	agent           *agent.Server
+	packages        *apppackages.Service
 }
 
 func LoadConfig(path string) (config.Config, error) {
@@ -180,6 +182,7 @@ func Open(c config.Config) (*Server, error) {
 		&worker.Cleanup{},
 		&worker.Fair{Label: "deployments", Job: wdelivery.DeploymentJob},
 		&worker.Fair{Label: "workspaces", Job: wdelivery.WorkspaceJob},
+		&worker.Fair{Label: "preview storage cleanup", Job: s.provisioner.PreviewCleanupJob},
 		&worker.Publication{Job: wpublisher.Job},
 		s.provisioner,
 	}
@@ -194,7 +197,8 @@ func Open(c config.Config) (*Server, error) {
 	s.sessions = &session.Manager{DB: db, Config: &s.Config, Sealer: seal, Passwords: passwords, Proxies: &s.trustedProxies}
 	s.authority = &roles.Authority{DB: db, Run: s.run}
 	s.dataAPI = &dataapi.Runtime{DB: db, Access: s.Checker, Authoring: s.authoring, Publisher: s.publisher, Sealer: seal, Config: &s.Config, Limiter: &s.limiter, Proxies: &s.trustedProxies, Slots: make(chan struct{}, entity.Limits.DataRequests)}
-	s.agent = &agent.Server{Checker: s.Checker, DB: db, Config: &s.Config, Inventory: s.inv, Members: s.members, Authority: s.authority, Storage: s.storage, Authoring: s.authoring, Delivery: s.delivery, Limiter: &s.limiter, Proxies: &s.trustedProxies, Slots: make(chan struct{}, agent.MaxConcurrent), BootstrapSlots: make(chan struct{}, agent.BootstrapConcurrent), TokenSlots: make(chan struct{}, agent.TokenConcurrent), ValidationSlots: make(chan struct{}, agent.ValidationConcurrent)}
+	s.packages = &apppackages.Service{DB: db, Run: s.run, Delivery: s.delivery}
+	s.agent = &agent.Server{Packages: s.packages, Checker: s.Checker, DB: db, Config: &s.Config, Inventory: s.inv, Members: s.members, Authority: s.authority, Storage: s.storage, Authoring: s.authoring, Delivery: s.delivery, Limiter: &s.limiter, Proxies: &s.trustedProxies, Slots: make(chan struct{}, agent.MaxConcurrent), BootstrapSlots: make(chan struct{}, agent.BootstrapConcurrent), TokenSlots: make(chan struct{}, agent.TokenConcurrent), ValidationSlots: make(chan struct{}, agent.ValidationConcurrent), SourceSlots: make(chan struct{}, agent.SourceConcurrent)}
 	return s, nil
 }
 

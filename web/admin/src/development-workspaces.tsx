@@ -55,8 +55,9 @@ export function DevelopmentWorkspaces({
   async function archive(row: Item) {
     const confirmed = await confirmAction({
       title: `Archive ${text(row.display_name)}?`,
-      message:
-        "Stops its development APIs and previews. Production and stored data are preserved.",
+      message: row.package_preview
+        ? "Stops this preview and deletes its test data. Production and release history are preserved."
+        : "Stops its development APIs and previews. Production and stored data are preserved.",
       confirmLabel: "Archive workspace",
       danger: true,
     });

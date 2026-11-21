@@ -57,6 +57,9 @@ var defaultCollection = Collection{"id,display_name", "display_name,id"}
 // collections maps each collection key to its search columns and order.
 var collections = map[string]Collection{
 	"me":                  {"id,display_name,slug,state", "display_name,id"},
+	"package-catalog":     {"package_key,version,display_name", "package_key,version"},
+	"package-stages":      {"package_key,version,stage_state", "workspace_id"},
+	"my-apps":             {"display_name", "display_name,id"},
 	"my-tenants":          {"id,display_name,slug,state", "display_name,id"},
 	"tenants":             {"id,display_name,slug,state", "display_name,id"},
 	"plans":               defaultCollection,

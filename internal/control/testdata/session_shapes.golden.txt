@@ -237,6 +237,7 @@ GET /v1/config -> 200
   .development_policy.upload.max_bytes number
   .development_policy.upload.max_file_bytes number
   .development_policy.upload.max_files number
+  .development_policy.upload.max_source_bytes number
   .development_policy.workspace_steps array
   .development_policy.workspace_steps[] string
   .login_url string

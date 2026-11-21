@@ -69,6 +69,7 @@ func (s *Server) Handler() http.Handler {
 	s.agent.Routes(s.mux, s.console())
 	s.workspaceRoutes()
 	s.releaseRoutes()
+	s.packageRoutes()
 	s.api("GET /v1/roles/catalog", s.roleCatalog)
 	s.api("GET /v1/tenants/{tenant}/my-role-assignments", s.myRoles)
 	s.api("GET /v1/tenants/{tenant}/capabilities", s.capabilities)

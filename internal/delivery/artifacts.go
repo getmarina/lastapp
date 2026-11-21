@@ -51,6 +51,9 @@ func (s *Service) UploadTicket(ctx context.Context, actor op.Actor, app string) 
 	}
 	secret := registry.Token(32)
 	e = s.Run.Mutate(ctx, actor, "release.manage", access.Resource{Tenant: a.TenantID, App: a.ID}, func(tx *sql.Tx) error {
+		if e := checkAppBuildQuota(ctx, tx, a.ID); e != nil {
+			return e
+		}
 		var n int
 		if e := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM artifact_uploads WHERE user_id=? AND expires_at>UTC_TIMESTAMP(6) AND build_id IS NULL", p.ID).Scan(&n); e != nil {
 			return e
@@ -180,18 +183,42 @@ func (s *Service) AuthorizeUpload(ctx context.Context, raw string) (Upload, erro
 	if _, e = s.uploadPrincipal(ctx, s.DB, v); e != nil {
 		return Upload{}, e
 	}
+	if v.BuildID == nil {
+		if e = checkAppBuildQuota(ctx, s.DB, v.AppID); e != nil {
+			return Upload{}, e
+		}
+	}
 	return Upload{raw: raw, ticket: v}, nil
 }
 
 // StoreBuild stores one immutable build for an authorized upload ticket. A
 // ticket produces one build: an identical retry returns it (created is false),
 // other content is rejected. requestID attributes the audit event.
-func (s *Service) StoreBuild(ctx context.Context, u Upload, in []artifact.File, entry, requestID string) (out registry.Row, created bool, err error) {
+func (s *Service) StoreBuild(ctx context.Context, u Upload, in []artifact.File, entry, requestID string, source ...[]byte) (out registry.Row, created bool, err error) {
 	raw, v := u.raw, u.ticket
 	b, e := artifact.Inspect(in, entry)
 	if e != nil {
 		return nil, false, registry.Bad(e.Error())
 	}
+	var sourceHash string
+	if len(source) > 0 && len(source[0]) > 0 {
+		if len(source[0]) > artifact.SourceLimit {
+			return nil, false, registry.Bad("Source archive exceeds its byte limit.")
+		}
+		sourceHash = artifact.SourceHash(source[0])
+	}
+	unlock, e := s.LockArtifacts(ctx, b.Hash, sourceHash)
+	if e != nil {
+		return nil, false, e
+	}
+	defer unlock()
+	var persistedBuild, persistedSource bool
+	defer func() {
+		if !created && (persistedBuild || persistedSource) {
+			s.reclaimUpload(ctx, v.TenantID, b.Hash, persistedBuild, sourceHash, persistedSource)
+		}
+	}()
+
 	tx, e := s.DB.BeginTx(ctx, nil)
 	if e != nil {
 		return nil, false, e
@@ -209,29 +236,26 @@ func (s *Service) StoreBuild(ctx context.Context, u Upload, in []artifact.File, 
 		return nil, false, e
 	}
 	if v.BuildID != nil {
-		var existing string
-		if e = registry.Lookup(ctx, tx, "SELECT content_hash FROM app_builds WHERE id=?", []any{*v.BuildID}, &existing); e != nil {
-			return nil, false, e
-		}
-		if existing != b.Hash {
-			return nil, false, registry.Conflict("Upload ticket already used for different content.")
-		}
-		return registry.Row{"content_hash": existing, "id": *v.BuildID}, false, nil
+		existing, e := buildReplay(ctx, tx, *v.BuildID, b.Hash, sourceHash)
+		return existing, false, e
 	}
-	var n int
-	if e = tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM app_builds WHERE app_id=?", v.AppID).Scan(&n); e != nil {
+	if e = checkAppBuildQuota(ctx, tx, v.AppID); e != nil {
 		return nil, false, e
 	}
-	if n >= registry.MaxAppBuilds {
-		return nil, false, registry.Conflict("App build limit reached. Create a fresh workspace.")
+	if sourceHash != "" {
+		if _, e = artifact.StoreSource(s.ArtifactDirectory(), source[0]); e != nil {
+			return nil, false, registry.Bad("Invalid source archive or source storage unavailable.")
+		}
+		persistedSource = true
 	}
 	if e = artifact.Store(s.ArtifactDirectory(), in, b); e != nil {
 		s.Warn(ctx, "artifact storage failed", e)
 		return nil, false, registry.Problem(503, "artifact_storage", "Could not persist the build.")
 	}
+	persistedBuild = true
+
 	build := registry.NewID()
-	files, _ := json.Marshal(b.Files)
-	if _, e = tx.ExecContext(ctx, "INSERT INTO app_builds(id,tenant_id,app_id,content_hash,files_json,entrypoint,size_bytes,created_by) VALUES(?,?,?,?,?,?,?,?)", build, v.TenantID, v.AppID, b.Hash, files, b.Entry, b.Size, p.ID); e != nil {
+	if e = insertBuild(ctx, tx, build, v.TenantID, v.AppID, p.ID, b, sourceHash); e != nil {
 		return nil, false, e
 	}
 	if _, e = tx.ExecContext(ctx, "UPDATE artifact_uploads SET build_id=? WHERE token_hash=?", build, registry.TokenHash(raw)); e != nil {
@@ -245,6 +269,17 @@ func (s *Service) StoreBuild(ctx context.Context, u Upload, in []artifact.File, 
 		return nil, false, e
 	}
 	return registry.Row{"id": build, "content_hash": b.Hash, "size_bytes": b.Size}, true, nil
+}
+
+func checkAppBuildQuota(ctx context.Context, q registry.Queryer, app string) error {
+	var n int
+	if e := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM app_builds WHERE app_id=?", app).Scan(&n); e != nil {
+		return e
+	}
+	if n >= registry.MaxAppBuilds {
+		return registry.Conflict("App build limit reached. Create a fresh workspace.")
+	}
+	return nil
 }
 
 // HostedApp resolves an active App on its static host: whether it belongs to
@@ -288,4 +323,27 @@ func (s *Service) HostedFile(ctx context.Context, app, id, name string) (io.Read
 	}
 	file, e := artifact.Read(s.ArtifactDirectory(), build.Hash, name)
 	return file, size, e
+}
+
+func buildReplay(ctx context.Context, q registry.Queryer, id, hash, source string) (registry.Row, error) {
+	var oldHash, oldSource string
+	e := registry.Lookup(ctx, q, `SELECT b.content_hash,COALESCE(bs.content_hash,'') FROM app_builds b
+	 LEFT JOIN build_sources bs ON bs.build_id=b.id WHERE b.id=?`, []any{id}, &oldHash, &oldSource)
+	if e != nil {
+		return nil, e
+	}
+	if oldHash != hash || oldSource != source {
+		return nil, registry.Conflict("Upload ticket already used for different content.")
+	}
+	return registry.Row{"content_hash": oldHash, "id": id}, nil
+}
+
+func insertBuild(ctx context.Context, tx *sql.Tx, id, tenant, app, creator string, b artifact.Build, source string) error {
+	files, _ := json.Marshal(b.Files)
+	_, e := tx.ExecContext(ctx, "INSERT INTO app_builds(id,tenant_id,app_id,content_hash,files_json,entrypoint,size_bytes,created_by) VALUES(?,?,?,?,?,?,?,?)", id, tenant, app, b.Hash, files, b.Entry, b.Size, creator)
+	if e != nil || source == "" {
+		return e
+	}
+	_, e = tx.ExecContext(ctx, "INSERT INTO build_sources(build_id,content_hash) VALUES(?,?)", id, source)
+	return e
 }

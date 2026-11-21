@@ -6,7 +6,11 @@ export type UploadTicket = {
   upload_token: string;
   expires_in: number;
   limits: Record<
-    "max_bytes" | "max_file_bytes" | "max_files" | "max_body_bytes",
+    | "max_bytes"
+    | "max_file_bytes"
+    | "max_files"
+    | "max_body_bytes"
+    | "max_source_bytes",
     number
   >;
 };

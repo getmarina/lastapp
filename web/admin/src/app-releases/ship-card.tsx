@@ -1,7 +1,10 @@
+import { useState } from "react";
 import { Download, RefreshCw, Upload } from "lucide-react";
 import { refreshQueries } from "../query";
 import {
   Alert,
+  Button,
+  Inline,
   Card,
   CardBody,
   CardHeader,
@@ -34,9 +37,10 @@ export function ShipCard({
   deployment: Deployment | null | undefined;
   live: boolean;
   failed: boolean;
-  upload: (files: FileList) => Promise<void>;
+  upload: (files: FileList, source?: File) => Promise<void>;
 }) {
   // Where this development App is on the way to production.
+  const [source, setSource] = useState<File>();
   const ship: Step[] = [
     {
       id: "workspace",
@@ -98,7 +102,7 @@ export function ShipCard({
               variant="primary"
               loading={busy}
               icon={<Icon icon={Upload} size="lg" aria-hidden />}
-              onFiles={upload}
+              onFiles={(files) => upload(files, source)}
             >
               {busy ? "Working…" : "Upload build folder"}
             </UploadButton>
@@ -108,6 +112,23 @@ export function ShipCard({
       <CardBody>
         <Stack gap="md">
           <Stepper label="Ship flow" steps={ship} />
+          <Inline>
+            <UploadButton
+              accept=".zip"
+              disabled={busy}
+              onFiles={(files) => setSource(files[0])}
+            >
+              {source ? "Replace source ZIP" : "Attach source ZIP"}
+            </UploadButton>
+            {source && (
+              <>
+                <span>{source.name}</span>
+                <Button disabled={busy} onClick={() => setSource(undefined)}>
+                  Clear source
+                </Button>
+              </>
+            )}
+          </Inline>
           <Alert tone="info" live={false}>
             Your agent can obtain the starter and perform uploads through MCP.
             The starter download contains files to write locally, pinned package

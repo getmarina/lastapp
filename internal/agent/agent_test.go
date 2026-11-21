@@ -22,7 +22,7 @@ import (
 func TestAgentToolContracts(t *testing.T) {
 	s := &Server{}
 	tools := s.Tools()
-	if len(tools) != 16 {
+	if len(tools) != 18 {
 		t.Fatal("unexpected tool surface", len(tools))
 	}
 	for _, tool := range tools {

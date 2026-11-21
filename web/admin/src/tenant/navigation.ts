@@ -3,6 +3,8 @@ import {
   Bot,
   House,
   LayoutGrid,
+  Package,
+  PanelsTopLeft,
   Shield,
   AlignLeft,
 } from "lucide-react";
@@ -33,6 +35,13 @@ export const peopleVisible = (c: Capabilities) =>
 const sections: (NavItem & { visible?: (c: Capabilities) => boolean })[] = [
   { id: "home", label: "Home", icon: House },
   { id: "apps", label: "Apps", icon: LayoutGrid },
+  { id: "my-apps", label: "My Apps", icon: PanelsTopLeft },
+  {
+    id: "packages",
+    label: "Packages",
+    icon: Package,
+    visible: (c) => c.can("workspace.manage"),
+  },
   {
     id: "entities",
     label: "Entities",

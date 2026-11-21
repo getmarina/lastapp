@@ -19,6 +19,7 @@ const config = JSON.parse(readFileSync(e2e.config, "utf8")) as {
   runtime_account_host: string;
 };
 
+export const e2eConfigPath = e2e.config;
 export const apiOrigin = config.public_url;
 export const uiOrigin = config.development_ui_origin;
 // Database account host the server provisions with ('%' for the container).
