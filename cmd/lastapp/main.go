@@ -36,7 +36,7 @@ func configureLogging(development bool) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fatal("usage: lastapp serve|migrate|bootstrap|seed-development -config path | runtime-grants -database name -host host")
+		fatal("usage: lastapp serve|migrate|bootstrap|seed-development|publish-package|retire-package|prune-package-artifacts -config path | runtime-grants -database name -host host")
 	}
 	command := os.Args[1]
 	if command == "runtime-grants" {
@@ -51,6 +51,12 @@ func main() {
 	email := flags.String("email", "", "bootstrap email")
 	provisionerFile := flags.String("provisioner-file", "", "local development provisioning credential file")
 	passwordFile := flags.String("password-file", "", "initial password file for a local bootstrap account")
+	manifest := flags.String("manifest", "", "package manifest JSON")
+	build := flags.String("build", "", "compiled package App directory")
+	source := flags.String("source", "", "matching source ZIP")
+	key := flags.String("package", "", "catalog package key to retire")
+	version := flags.String("version", "", "catalog version to retire")
+	entry := flags.String("entry", "index.html", "compiled App entry point")
 	_ = flags.Parse(os.Args[2:]) // ExitOnError: Parse exits on failure
 	c, e := control.LoadConfig(*config)
 	if e != nil {
@@ -65,6 +71,22 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	switch command {
+	case "retire-package":
+		if e = control.CheckSchema(ctx, s.DB); e == nil {
+			e = s.RetirePackage(ctx, *key, *version)
+		}
+	case "prune-package-artifacts":
+		if e = control.CheckSchema(ctx, s.DB); e == nil {
+			var removed int
+			removed, e = s.PrunePackageArtifacts(ctx)
+			if e == nil {
+				fmt.Printf("Removed %d abandoned artifacts\n", removed)
+			}
+		}
+	case "publish-package":
+		if e = control.CheckSchema(ctx, s.DB); e == nil {
+			e = publishPackage(ctx, s, *manifest, *build, *source, *entry)
+		}
 	case "migrate":
 		e = control.Migrate(ctx, s.DB)
 	case "bootstrap":

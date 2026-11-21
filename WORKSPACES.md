@@ -118,8 +118,10 @@ captured Space backend.
 - Undeployed release snapshots use the same private workspace boundary, including
   the owning agent grant. Queued or failed deployments do not make them shared.
   Successfully deployed releases remain inspectable as production history by
-  authorized source-Space managers after the workspace is archived; this grants
-  no access to the private backing Space.
+  authorized source-Space managers after the workspace is archived. A failed
+  package activation can be retried by a current production manager using the
+  recorded package plan. Private workspace and undeployed source access still
+  require the workspace owner.
 - Ordinary direct production mutations by an agent now additionally require
   `production.deploy`; their existing draft/access/resource permissions still
   apply. A development delegation cannot quietly switch its target to production.
@@ -184,18 +186,22 @@ The browser obtains its actual API origin and environment App ID from
 `workspace_database_target_id` optionally selects a platform-managed development
 database target, useful when production uses a registered/external database.
 Otherwise allocation uses the source Space's database target. The selected
-target must permit managed provisioning. Plan database quotas still apply;
-provision enough database capacity for isolated workspaces.
+target must permit managed provisioning. Ordinary workspaces count against the
+plan database quota. Catalog package stages have a separate per-Space preview
+capacity. Archiving one of those previews permanently removes its generated
+database and test data through the background worker.
 Workspace Apps use the separate workspace metadata cap exposed in the development
 policy. A full production App quota does not block development creation or
 restoration; production creation/restoration and deployment still enforce it.
 
-Uploads accept a file tree, never archives, SQL or backend executables. The
-server bounds the body, total/file sizes, file count, simultaneous uploads and
+Compiled builds upload as a file tree, with an optional private source ZIP.
+The server bounds the body, total/file sizes, file count, simultaneous uploads and
 outstanding tickets. Paths reject traversal, dotfiles, reserved runtime paths
 and unsafe encoding; filesystem reads stay confined to the storage root.
-Tickets are hashed, scoped, short-lived and checked against current authority;
-identical retries return the existing build, changed-content replay fails.
+Tickets are hashed, scoped, short-lived and checked against current authority.
+The server checks build quota before storing artifacts and reclaims unreferenced
+files if the upload transaction fails. Identical retries return the existing
+build, and changed-content replay fails.
 
 Current limits are owned by `internal/artifact/store.go` and
 `internal/registry/policy.go` (served by `delivery.Policy` in `internal/delivery/policy.go`), exposed by `/v1/config` and MCP context. Builds and releases are capped per development App;

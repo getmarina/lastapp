@@ -25,20 +25,20 @@ type (
 
 // A snapshot contains configuration only. Never add records, credentials,
 // assignments or approved origins here: it is also the release review boundary.
-type spaceSnapshot struct {
-	Revision  int64              `json:"revision"`
-	Entities  []snapshotEntity   `json:"entities"`
-	Roles     []snapshotRole     `json:"roles"`
-	Apps      []snapshotApp      `json:"apps"`
-	Microapps []snapshotMicroapp `json:"microapps"`
+type SpaceConfiguration struct {
+	Revision  int64                `json:"revision"`
+	Entities  []ConfiguredEntity   `json:"entities"`
+	Roles     []ConfiguredRole     `json:"roles"`
+	Apps      []ConfiguredApp      `json:"apps"`
+	Microapps []ConfiguredMicroapp `json:"microapps"`
 }
-type snapshotEntity struct {
+type ConfiguredEntity struct {
 	Revision   int64             `json:"revision"`
 	ID         string            `json:"id"`
 	State      string            `json:"state"`
 	Definition entity.Definition `json:"definition"`
 }
-type snapshotRole struct {
+type ConfiguredRole struct {
 	Revision int64  `json:"revision"`
 	ID       string `json:"id"`
 	App      string `json:"app_id,omitempty"`
@@ -46,7 +46,7 @@ type snapshotRole struct {
 	Name     string `json:"display_name"`
 	State    string `json:"state"`
 }
-type snapshotApp struct {
+type ConfiguredApp struct {
 	Revision int64            `json:"revision"`
 	ID       string           `json:"id"`
 	Slug     string           `json:"slug"`
@@ -54,7 +54,7 @@ type snapshotApp struct {
 	State    string           `json:"state"`
 	Access   entity.AppAccess `json:"access"`
 }
-type snapshotMicroapp struct {
+type ConfiguredMicroapp struct {
 	Revision int64  `json:"revision"`
 	ID       string `json:"id"`
 	App      string `json:"app_id"`
@@ -65,29 +65,29 @@ type snapshotMicroapp struct {
 	State    string `json:"state"`
 }
 
-func (v *snapshotRole) ScanFields() []any {
+func (v *ConfiguredRole) ScanFields() []any {
 	return []any{&v.Revision, &v.ID, &v.App, &v.Code, &v.Name, &v.State}
 }
 
-func (v *snapshotMicroapp) ScanFields() []any {
+func (v *ConfiguredMicroapp) ScanFields() []any {
 	return []any{&v.Revision, &v.ID, &v.App, &v.Slug, &v.Name, &v.Artifact, &v.Order, &v.State}
 }
 
-func (s *Service) snapshot(ctx context.Context, q registry.Queryer, space string) (spaceSnapshot, error) {
+func (s *Service) snapshot(ctx context.Context, q registry.Queryer, space string) (SpaceConfiguration, error) {
 	var definitionBytes int64
 	if e := q.QueryRowContext(ctx, "SELECT COALESCE(SUM(OCTET_LENGTH(v.definition_json)),0) FROM entity_definitions e JOIN entity_versions v ON v.id=e.active_version_id WHERE e.space_id=?", space).Scan(&definitionBytes); e != nil {
-		return spaceSnapshot{}, e
+		return SpaceConfiguration{}, e
 	}
 	if definitionBytes > registry.MaxSpaceSnapshotBytes {
-		return spaceSnapshot{}, registry.Conflict("Space configuration exceeds the workspace/release snapshot limit.")
+		return SpaceConfiguration{}, registry.Conflict("Space configuration exceeds the workspace/release snapshot limit.")
 	}
-	out := spaceSnapshot{Entities: []snapshotEntity{}, Roles: []snapshotRole{}, Apps: []snapshotApp{}, Microapps: []snapshotMicroapp{}}
+	out := SpaceConfiguration{Entities: []ConfiguredEntity{}, Roles: []ConfiguredRole{}, Apps: []ConfiguredApp{}, Microapps: []ConfiguredMicroapp{}}
 	if e := q.QueryRowContext(ctx, "SELECT revision FROM spaces WHERE id=?", space).Scan(&out.Revision); e != nil {
 		return out, e
 	}
 	var pending *string
 	var definition registry.JSONValue
-	var captured snapshotEntity
+	var captured ConfiguredEntity
 	r, e := q.QueryContext(ctx, "SELECT e.id,e.revision,e.state,e.pending_version_id,v.definition_json FROM entity_definitions e JOIN entity_versions v ON v.id=e.active_version_id WHERE e.space_id=? ORDER BY e.id", space)
 	if e != nil {
 		return out, e
@@ -108,7 +108,7 @@ func (s *Service) snapshot(ctx context.Context, q registry.Queryer, space string
 	if e = r.Err(); e != nil {
 		return out, e
 	}
-	if out.Roles, e = registry.ScanAll[snapshotRole](ctx, q, "SELECT revision,id,COALESCE(app_id,''),code,display_name,state FROM roles WHERE space_id=? AND domain='data' ORDER BY id", space); e != nil {
+	if out.Roles, e = registry.ScanAll[ConfiguredRole](ctx, q, "SELECT revision,id,COALESCE(app_id,''),code,display_name,state FROM roles WHERE space_id=? AND domain='data' ORDER BY id", space); e != nil {
 		return out, e
 	}
 	apps, e := registry.ScanAll[registry.AppRecord](ctx, q, "SELECT "+registry.AppRecordColumns+" FROM apps WHERE space_id=? ORDER BY id", space)
@@ -121,9 +121,9 @@ func (s *Service) snapshot(ctx context.Context, q registry.Queryer, space string
 			return out, e
 		}
 		a.Origin = ""
-		out.Apps = append(out.Apps, snapshotApp{v.Revision, v.ID, v.Slug, v.Name, v.State, a})
+		out.Apps = append(out.Apps, ConfiguredApp{v.Revision, v.ID, v.Slug, v.Name, v.State, a})
 	}
-	if out.Microapps, e = registry.ScanAll[snapshotMicroapp](ctx, q, "SELECT m.revision,m.id,m.app_id,m.slug,m.display_name,COALESCE(m.artifact_ref,''),m.navigation_order,m.state FROM microapp_installations m JOIN apps a ON a.id=m.app_id WHERE a.space_id=? ORDER BY m.id", space); e != nil {
+	if out.Microapps, e = registry.ScanAll[ConfiguredMicroapp](ctx, q, "SELECT m.revision,m.id,m.app_id,m.slug,m.display_name,COALESCE(m.artifact_ref,''),m.navigation_order,m.state FROM microapp_installations m JOIN apps a ON a.id=m.app_id WHERE a.space_id=? ORDER BY m.id", space); e != nil {
 		return out, e
 	}
 	encoded, _ := json.Marshal(out)
@@ -145,13 +145,14 @@ func scanWorkspaceStorage(ctx context.Context, q registry.Queryer, where string,
 // WorkspaceItem is a workspace in a Space's collection.
 type WorkspaceItem struct {
 	// AgentClient names the agent client that owns an agent workspace.
-	AgentClient  *string   `json:"agent_client_name"`
-	BackingSpace string    `json:"backing_space_id"`
-	CreatedAt    time.Time `json:"created_at"`
-	Name         string    `json:"display_name"`
-	Error        *string   `json:"error_message"`
-	ID           string    `json:"id"`
-	OwnerGrant   *string   `json:"owner_agent_grant_id"`
+	AgentClient    *string   `json:"agent_client_name"`
+	BackingSpace   string    `json:"backing_space_id"`
+	CreatedAt      time.Time `json:"created_at"`
+	Name           string    `json:"display_name"`
+	Error          *string   `json:"error_message"`
+	ID             string    `json:"id"`
+	OwnerGrant     *string   `json:"owner_agent_grant_id"`
+	PackagePreview bool      `json:"package_preview,omitempty"`
 	// PreparationStep is the WorkspaceSteps step a preparing workspace has
 	// reached, or a failed one failed at.
 	PreparationStep *string `json:"preparation_step"`
@@ -161,7 +162,7 @@ type WorkspaceItem struct {
 }
 
 func (v *WorkspaceItem) ScanFields() []any {
-	return []any{&v.AgentClient, &v.BackingSpace, &v.CreatedAt, &v.Name, &v.Error, &v.ID, &v.OwnerGrant, &v.PreparationStep, &v.ProductionSpace, &v.Revision, &v.State}
+	return []any{&v.AgentClient, &v.BackingSpace, &v.CreatedAt, &v.Name, &v.Error, &v.ID, &v.OwnerGrant, &v.PackagePreview, &v.PreparationStep, &v.ProductionSpace, &v.Revision, &v.State}
 }
 
 // workspaceIDs maps a workspace's development ids to production ids.
@@ -195,7 +196,11 @@ func (s *Service) Workspaces(ctx context.Context, actor op.Actor, space string, 
 	if e := s.Access.Authorize(ctx, s.DB, p, "workspace.manage", access.Resource{Tenant: tenant, Space: space}, true); e != nil {
 		return op.Page[WorkspaceItem]{}, e
 	}
-	query := "SELECT g.client_name AS agent_client_name,w.backing_space_id,w.created_at,w.display_name,w.error_message,w.id,w.owner_agent_grant_id,w.preparation_step,w.production_space_id,w.revision,w.state FROM development_workspaces w LEFT JOIN agent_grants g ON g.id=w.owner_agent_grant_id WHERE w.production_space_id=? AND w.owner_user_id=?"
+	query := `SELECT g.client_name AS agent_client_name,w.backing_space_id,w.created_at,w.display_name,w.error_message,
+		w.id,w.owner_agent_grant_id,d.package_preview,w.preparation_step,w.production_space_id,w.revision,w.state
+		FROM development_workspaces w JOIN spaces sp ON sp.id=w.backing_space_id
+		JOIN database_resources d ON d.id=sp.database_resource_id LEFT JOIN agent_grants g ON g.id=w.owner_agent_grant_id
+		WHERE w.production_space_id=? AND w.owner_user_id=?`
 	args := []any{space, p.ID}
 	if p.Agent != nil {
 		query += " AND w.owner_agent_grant_id=?"
@@ -216,6 +221,12 @@ func (s *Service) Workspace(ctx context.Context, actor op.Actor, workspace strin
 }
 
 func (s *Service) CreateWorkspace(ctx context.Context, actor op.Actor, space string, in WorkspaceCreateInput) (registry.Workspace, error) {
+	return s.StageWorkspace(ctx, actor, space, in, nil)
+}
+
+// StageWorkspace creates a workspace against the real production base and can
+// add transactionally recorded, preplanned configuration to its private copy.
+func (s *Service) StageWorkspace(ctx context.Context, actor op.Actor, space string, in WorkspaceCreateInput, stage func(context.Context, *sql.Tx, SpaceConfiguration) (SpaceConfiguration, error)) (registry.Workspace, error) {
 	p := actor.Principal
 	if in.ID == "" {
 		in.ID = actor.OperationID()
@@ -235,12 +246,8 @@ func (s *Service) CreateWorkspace(ctx context.Context, actor op.Actor, space str
 		return registry.Workspace{}, registry.Bad("Workspaces cannot contain workspaces.")
 	}
 	e := s.Run.Mutate(ctx, actor, "workspace.manage", res, func(tx *sql.Tx) error {
-		var owned, total int
-		if e := tx.QueryRowContext(ctx, "SELECT COUNT(*),COALESCE(SUM(owner_user_id=?),0) FROM development_workspaces WHERE production_space_id=? AND state<>'archived'", p.ID, res.Space).Scan(&total, &owned); e != nil {
+		if e := CheckWorkspaceQuota(ctx, tx, res.Space, p.ID); e != nil {
 			return e
-		}
-		if owned >= registry.MaxOwnedWorkspaces || total >= registry.MaxSpaceWorkspaces {
-			return registry.Conflict("Archive an unused workspace before creating another.")
 		}
 		if e := s.ensureSnapshotReady(ctx, tx, res.Space); e != nil {
 			return e
@@ -250,22 +257,16 @@ func (s *Service) CreateWorkspace(ctx context.Context, actor op.Actor, space str
 			return e
 		}
 		b, _ := json.Marshal(base)
-		var layout, target string
-		if e = registry.Lookup(ctx, tx, "SELECT sp.database_layout,d.target_id FROM spaces sp JOIN database_resources d ON d.id=sp.database_resource_id WHERE sp.id=?", []any{res.Space}, &layout, &target); e != nil {
-			return e
-		}
-		if s.Config.WorkspaceDatabaseTarget != "" {
-			target = s.Config.WorkspaceDatabaseTarget
-		}
-		policy, e := registry.PolicyFor(ctx, tx, res.Tenant)
+		database, policy, e := s.workspaceAllocation(ctx, tx, res, stage != nil)
 		if e != nil {
 			return e
 		}
-		backing, resource := registry.NewID(), registry.NewID()
-		if e = s.Storage.Allocate(ctx, tx, actor, res.Tenant, databases.DatabaseInput{ID: resource, Mode: "managed", Layout: layout, Target: target}, policy, &res); e != nil {
+		backing := registry.NewID()
+		database.ID = registry.NewID()
+		if e = s.Storage.Allocate(ctx, tx, actor, res.Tenant, database, policy, &res); e != nil {
 			return e
 		}
-		if _, e = tx.ExecContext(ctx, "INSERT INTO spaces(id,tenant_id,slug,display_name,database_resource_id,database_layout) VALUES(?,?,?,?,?,?)", backing, res.Tenant, "dev-"+strings.ReplaceAll(in.ID, "-", ""), in.Name, resource, layout); e != nil {
+		if _, e = tx.ExecContext(ctx, "INSERT INTO spaces(id,tenant_id,slug,display_name,database_resource_id,database_layout) VALUES(?,?,?,?,?,?)", backing, res.Tenant, "dev-"+strings.ReplaceAll(in.ID, "-", ""), in.Name, database.ID, database.Layout); e != nil {
 			return e
 		}
 		var grant any
@@ -281,6 +282,16 @@ func (s *Service) CreateWorkspace(ctx context.Context, actor op.Actor, space str
 		if e = roles.AssignInitialManager(ctx, tx, actor, res.Tenant, backing, "", p.ID); e != nil {
 			return e
 		}
+		if stage != nil {
+			extra, err := stage(ctx, tx, base)
+			if err != nil {
+				return err
+			}
+			base.Entities = append(base.Entities, extra.Entities...)
+			base.Apps = append(base.Apps, extra.Apps...)
+			base.Microapps = append(base.Microapps, extra.Microapps...)
+			base.Roles = append(base.Roles, extra.Roles...)
+		}
 		if e = s.installSnapshot(ctx, tx, base, res.Tenant, backing, in.ID); e != nil {
 			return e
 		}
@@ -290,6 +301,26 @@ func (s *Service) CreateWorkspace(ctx context.Context, actor op.Actor, space str
 		return registry.Workspace{}, e
 	}
 	return s.Workspace(ctx, actor, in.ID)
+}
+
+func (s *Service) workspaceAllocation(ctx context.Context, q registry.Queryer, res access.Resource, packagePreview bool) (databases.DatabaseInput, registry.Policy, error) {
+	in := databases.DatabaseInput{Mode: "managed", PackagePreview: packagePreview}
+	if e := registry.Lookup(ctx, q, "SELECT sp.database_layout,d.target_id FROM spaces sp JOIN database_resources d ON d.id=sp.database_resource_id WHERE sp.tenant_id=? AND sp.id=?", []any{res.Tenant, res.Space}, &in.Layout, &in.Target); e != nil {
+		return in, registry.Policy{}, e
+	}
+	if s.Config.WorkspaceDatabaseTarget != "" {
+		in.Target = s.Config.WorkspaceDatabaseTarget
+	}
+	policy, e := registry.PolicyFor(ctx, q, res.Tenant)
+	return in, policy, e
+}
+
+func (s *Service) CheckPackagePreviewStorage(ctx context.Context, q registry.Queryer, res access.Resource) error {
+	in, policy, e := s.workspaceAllocation(ctx, q, res, true)
+	if e != nil {
+		return e
+	}
+	return s.Storage.CheckAllocation(ctx, q, res.Tenant, in, policy, &res)
 }
 
 // entityVersionRef names an entity and one of its versions.
@@ -346,6 +377,9 @@ func (s *Service) ChangeWorkspace(ctx context.Context, actor op.Actor, workspace
 			if _, e = tx.ExecContext(ctx, "UPDATE spaces SET state='archived',revision=revision+1 WHERE id=?", v.BackingSpace); e != nil {
 				return e
 			}
+			if e = databases.SchedulePreviewCleanup(ctx, tx, v.ID); e != nil {
+				return e
+			}
 		}
 		return op.AuditAs(ctx, tx, actor, v.TenantID, "workspace."+state, "workspace", v.ID, registry.Row{})
 	})
@@ -353,4 +387,17 @@ func (s *Service) ChangeWorkspace(ctx context.Context, actor op.Actor, workspace
 		return registry.Workspace{}, e
 	}
 	return s.Workspace(ctx, actor, workspace)
+}
+
+// CheckWorkspaceQuota is shared between read-only preflight and the locked
+// workspace allocation. Only the latter can reserve a slot.
+func CheckWorkspaceQuota(ctx context.Context, q registry.Queryer, space, user string) error {
+	var owned, total int
+	if e := q.QueryRowContext(ctx, "SELECT COUNT(*),COALESCE(SUM(owner_user_id=?),0) FROM development_workspaces WHERE production_space_id=? AND state<>'archived'", user, space).Scan(&total, &owned); e != nil {
+		return e
+	}
+	if owned >= registry.MaxOwnedWorkspaces || total >= registry.MaxSpaceWorkspaces {
+		return registry.Conflict("Archive an unused workspace before creating another.")
+	}
+	return nil
 }

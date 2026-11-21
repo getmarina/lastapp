@@ -11,6 +11,7 @@ import type { TenantScreen } from "./screen";
 import { tenantTabs } from "./navigation";
 import { AppsPage, SpacesPage } from "./inventory";
 import { HomePage } from "./home-page";
+import { PackagesPage, MyAppsPage } from "./packages-page";
 import { SpacePage } from "./space-page";
 import { AppPage } from "./app-page";
 import { TenantSettings } from "./settings-page";
@@ -91,6 +92,8 @@ function TenantPage({
     <>
       {route.page === "home" && <HomePage t={t} />}
       {route.page === "apps" && <AppsPage t={t} />}
+      {route.page === "packages" && <PackagesPage t={t} />}
+      {route.page === "my-apps" && <MyAppsPage t={t} />}
       {route.page === "spaces" && <SpacesPage t={t} />}
       {route.page === "space" && detailReady && <SpacePage t={t} />}
       {route.page === "app" && detailReady && <AppPage t={t} />}

@@ -105,6 +105,10 @@ When a reverse proxy forwards client addresses, configure `trusted_proxies` with
 
 The deployment encryption key is a base64 32-byte key. This first version uses one configured key generation (`encryption_key_id`, default `primary-v1`); automatic key rotation/re-encryption is not implemented. Preserve keys with registry backups.
 
+## Business packages
+
+Tenant managers can clone an approved package as business objects or as objects with a prebuilt App. Installed Apps and their source can be customized in development workspaces. See [starter business packages](PACKAGES.md) for catalog publishing, installation and MCP tools.
+
 ## Scope of this phase
 
 Implemented: centralized identity/inventory, scoped role management, fixed Tenant/team catalogs, custom Space/App business roles and assignments, plan quotas, lifecycle management, real database provisioning/registration, retries/recovery, auditing and the matching admin UI.

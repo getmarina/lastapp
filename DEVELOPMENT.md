@@ -73,6 +73,12 @@ that API. Dependencies point down the existing layers, with transport and
 service wiring at the top. Register each new internal package in
 [`TestPackageLayering`](internal/layering_test.go) and add it to the package map.
 
+Package catalog, portable references, destination planning, and installation
+provenance belong to `internal/apppackages`. It calls delivery with a typed
+Space configuration. Delivery shares the release worker, publisher and
+activation guards with ordinary releases. Console and MCP use the same package
+service. See [package authoring and operations](PACKAGES.md).
+
 ## Implemented versus planned
 
 | Implemented | Still planned / unavailable |

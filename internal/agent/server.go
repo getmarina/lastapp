@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/aantich/lastapp/internal/access"
+	"github.com/aantich/lastapp/internal/apppackages"
 	"github.com/aantich/lastapp/internal/config"
 	"github.com/aantich/lastapp/internal/databases"
 	"github.com/aantich/lastapp/internal/delivery"
@@ -36,6 +37,7 @@ type Server struct {
 	Storage   *databases.Storage
 	Authoring *entities.Authoring
 	Delivery  *delivery.Service
+	Packages  *apppackages.Service
 	// Limiter is the per-principal request limiter shared with console sessions.
 	Limiter *httpapi.Limiter
 	Proxies *httpapi.TrustedProxies
@@ -44,6 +46,7 @@ type Server struct {
 	BootstrapSlots    chan struct{}
 	TokenSlots        chan struct{}
 	ValidationSlots   chan struct{}
+	SourceSlots       chan struct{}
 	bootstrapLimiter  httpapi.Limiter
 	validationLimiter httpapi.Limiter
 }
@@ -74,6 +77,7 @@ func ValidateClients(clients []config.AgentClient) error {
 // Routes registers the OAuth authorization server, the console agent-access
 // endpoints (wrapped by the console session supplied by control) and /mcp.
 func (s *Server) Routes(mux *http.ServeMux, console httpapi.Session) {
+	mux.HandleFunc("GET /mcp/sources/{release}", s.sourceDownload)
 	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", func(w http.ResponseWriter, r *http.Request) {
 		httpapi.Send(w, 200, registry.Row{"resource": s.mcpURL(), "authorization_servers": []string{s.Config.PublicURL}, "scopes_supported": ScopeCodes(), "bearer_methods_supported": []string{"header"}})
 	})
@@ -111,6 +115,7 @@ const (
 	BootstrapConcurrent     = 4
 	TokenConcurrent         = 4
 	ValidationConcurrent    = 8
+	SourceConcurrent        = 4
 	agentMaxClientRedirects = 16
 	MaxClientMetadata       = 65536
 )

@@ -63,6 +63,15 @@ func (p *Provisioner) Run(ctx context.Context, db *sql.DB) (bool, error) {
 	}
 	var active string
 	e = tx.QueryRowContext(ctx, "SELECT state FROM tenants WHERE id=? FOR UPDATE", tenant).Scan(&active)
+	if e == nil {
+		var eligible bool
+		e = tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM database_resources
+			 WHERE id=? AND tenant_id=? AND state='pending' AND preview_cleanup_at IS NULL)`, record, tenant).Scan(&eligible)
+		if e == nil && !eligible {
+			tx.Rollback()
+			return true, nil // The selected resource was archived or changed.
+		}
+	}
 	if e == nil && job.AgentGrant != "" {
 		res, permission := access.Resource{Tenant: tenant}, "databases.provision"
 		var production string
@@ -181,32 +190,15 @@ func (p *Provisioner) Provision(ctx context.Context, record string) error {
 		defer db.Close()
 		return ValidateRuntime(ctx, db, name, false)
 	}
-	var admin Credentials
-	if e = p.Sealer.Unseal("target", job.TargetID, "", job.Provisioning, &admin); e != nil {
-		return e
-	}
-	db, e := p.Connect(ctx, job.DatabaseEndpoint, admin, "")
+	principal, marker, e := managedIdentity(record, job, runtime)
 	if e != nil {
 		return e
 	}
-	defer db.Close()
-	conn, e := db.Conn(ctx)
+	conn, release, e := p.lockManaged(ctx, record, job)
 	if e != nil {
 		return e
 	}
-	defer conn.Close()
-	var got int
-	if e = conn.QueryRowContext(ctx, "SELECT GET_LOCK(?,5)", "lastapp:resource:"+record).Scan(&got); e != nil {
-		return e
-	}
-	if got != 1 {
-		return registry.Problem(409, "provisioning_busy", "Another worker still owns the resource; retry shortly.")
-	}
-	defer data.ReleasePinnedLock(conn, "lastapp:resource:"+record)
-	if !GeneratedName.MatchString(name) || runtime.Username != name || !accountHostRE.MatchString(runtime.AccountHost) {
-		return OwnershipConflict()
-	}
-	marker := "lastapp:" + record + ":" + hex.EncodeToString(job.Ownership)
+	defer release()
 	var comment string
 	e = conn.QueryRowContext(ctx, "SELECT SCHEMA_COMMENT FROM information_schema.SCHEMATA WHERE SCHEMA_NAME=?", name).Scan(&comment)
 	if errors.Is(e, sql.ErrNoRows) {
@@ -219,10 +211,6 @@ func (p *Provisioner) Provision(ctx context.Context, record string) error {
 	} else if comment != marker {
 		return OwnershipConflict()
 	}
-	if !generatedPasswordRE.MatchString(runtime.Password) {
-		return OwnershipConflict()
-	}
-	principal := "'" + runtime.Username + "'@'" + runtime.AccountHost + "'"
 	_, e = conn.ExecContext(ctx, "CREATE USER "+principal+" IDENTIFIED BY '"+runtime.Password+"'")
 	var me *mariadb.MySQLError
 	if e != nil && (!errors.As(e, &me) || me.Number != 1396) {
@@ -247,6 +235,45 @@ func (p *Provisioner) Provision(ctx context.Context, record string) error {
 	}
 	defer verify.Close()
 	return ValidateRuntime(ctx, verify, name, true)
+}
+
+func managedIdentity(record string, job ResourceAccess, runtime Credentials) (principal, marker string, err error) {
+	if !GeneratedName.MatchString(job.Name) || runtime.Username != job.Name || !accountHostRE.MatchString(runtime.AccountHost) || !generatedPasswordRE.MatchString(runtime.Password) {
+		return "", "", OwnershipConflict()
+	}
+	return "'" + runtime.Username + "'@'" + runtime.AccountHost + "'", "lastapp:" + record + ":" + hex.EncodeToString(job.Ownership), nil
+}
+
+func (p *Provisioner) lockManaged(ctx context.Context, record string, job ResourceAccess) (*sql.Conn, func(), error) {
+	var admin Credentials
+	if e := p.Sealer.Unseal("target", job.TargetID, "", job.Provisioning, &admin); e != nil {
+		return nil, nil, e
+	}
+	db, e := p.Connect(ctx, job.DatabaseEndpoint, admin, "")
+	if e != nil {
+		return nil, nil, e
+	}
+	conn, e := db.Conn(ctx)
+	if e != nil {
+		db.Close()
+		return nil, nil, e
+	}
+	lock := "lastapp:resource:" + record
+	var got int
+	e = conn.QueryRowContext(ctx, "SELECT GET_LOCK(?,5)", lock).Scan(&got)
+	if e != nil || got != 1 {
+		conn.Close()
+		db.Close()
+		if e == nil {
+			e = registry.Problem(409, "provisioning_busy", "Another worker still owns the resource; retry shortly.")
+		}
+		return nil, nil, e
+	}
+	return conn, func() {
+		data.ReleasePinnedLock(conn, lock)
+		conn.Close()
+		db.Close()
+	}, nil
 }
 
 // ValidateRuntime checks the server version and the runtime account's grants on
@@ -344,5 +371,5 @@ func (v *ProvisioningJob) ScanFields() []any {
 // NextJob round-robins Tenants, oldest job within each Tenant. A slow Tenant can
 // consume at most one 45-second attempt before another waiting Tenant gets a turn.
 func NextJob(ctx context.Context, q registry.Queryer, lastTenant string) (ProvisioningJob, error) {
-	return registry.ScanOne[ProvisioningJob](ctx, q, "SELECT d.id,d.tenant_id,d.target_id,COALESCE(d.agent_grant_id,''),COALESCE(d.agent_user_id,''),COALESCE(ag.client_id,'') FROM database_resources d JOIN tenants t ON t.id=d.tenant_id JOIN database_targets dt ON dt.id=d.target_id LEFT JOIN agent_grants ag ON ag.id=d.agent_grant_id WHERE d.state='pending' AND t.state='active' AND dt.state='active' ORDER BY (d.tenant_id>?) DESC,d.tenant_id,d.created_at,d.id LIMIT 1", lastTenant)
+	return registry.ScanOne[ProvisioningJob](ctx, q, "SELECT d.id,d.tenant_id,d.target_id,COALESCE(d.agent_grant_id,''),COALESCE(d.agent_user_id,''),COALESCE(ag.client_id,'') FROM database_resources d JOIN tenants t ON t.id=d.tenant_id JOIN database_targets dt ON dt.id=d.target_id LEFT JOIN agent_grants ag ON ag.id=d.agent_grant_id WHERE d.state='pending' AND d.preview_cleanup_at IS NULL AND t.state='active' AND dt.state='active' ORDER BY (d.tenant_id>?) DESC,d.tenant_id,d.created_at,d.id LIMIT 1", lastTenant)
 }

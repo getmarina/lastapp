@@ -73,9 +73,9 @@ export function AppReleases({
     onSuccess: () => {},
     onError: setError,
   });
-  async function upload(files: FileList) {
+  async function upload(files: FileList, source?: File) {
     await run(async () => {
-      await capture(await uploadBuild(app.id, files));
+      await capture(await uploadBuild(app.id, files, source));
     });
   }
   async function capture(buildID: string) {

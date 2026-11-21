@@ -60,7 +60,7 @@ func (s *Service) Starter(ctx context.Context, actor op.Actor, app string) (regi
 		return nil, e
 	}
 	files["src/lastapp.ts"] = clientsdk.Source
-	config, _ := json.MarshalIndent(registry.Row{"apiOrigin": s.Config.PublicURL, "appID": a.ID, "environment": "development"}, "", "  ")
+	config, _ := json.MarshalIndent(s.localConfiguration(a.ID), "", "  ")
 	files["lastapp.local.json"] = string(config) + "\n"
 	pkg, _ := json.MarshalIndent(registry.Row{"name": "lastapp-client", "private": true, "version": "0.0.0", "type": "module", "scripts": registry.Row{"dev": "vite", "build": "tsc --noEmit && vite build", "preview": "vite preview", "upload": "node scripts/upload.mjs"}, "dependencies": registry.Row{"react": versions["react"], "react-dom": versions["react-dom"]}, "devDependencies": registry.Row{"typescript": versions["typescript"], "vite": versions["vite"], "@types/react": versions["@types/react"], "@types/react-dom": versions["@types/react-dom"]}}, "", "  ")
 	files["package.json"] = string(pkg) + "\n"

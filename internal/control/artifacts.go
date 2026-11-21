@@ -62,10 +62,11 @@ func (s *Server) artifactUpload(w http.ResponseWriter, r *http.Request) {
 			return registry.Problem(403, "invalid_origin", "Upload is restricted to trusted authoring clients.")
 		}
 		var in struct {
-			Files []artifact.File `json:"files"`
-			Entry string          `json:"entrypoint"`
+			Files  []artifact.File `json:"files"`
+			Entry  string          `json:"entrypoint"`
+			Source []byte          `json:"source_zip,omitempty"`
 		}
-		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, artifact.MaxBody))
+		d := json.NewDecoder(http.MaxBytesReader(w, r.Body, artifact.MaxBody+((artifact.SourceLimit+2)/3)*4+128))
 		d.DisallowUnknownFields()
 		if d.Decode(&in) != nil {
 			return registry.Bad("Invalid or oversized static build upload.")
@@ -74,7 +75,7 @@ func (s *Server) artifactUpload(w http.ResponseWriter, r *http.Request) {
 		if !errors.Is(d.Decode(&more), io.EOF) {
 			return registry.Bad("One upload object required.")
 		}
-		v, created, e := s.delivery.StoreBuild(ctx, upload, in.Files, in.Entry, r.Header.Get("X-Request-ID"))
+		v, created, e := s.delivery.StoreBuild(ctx, upload, in.Files, in.Entry, r.Header.Get("X-Request-ID"), in.Source)
 		if e != nil {
 			return e
 		}

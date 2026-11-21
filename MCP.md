@@ -115,6 +115,8 @@ intended change.
 | `lastapp_app_access_update` | Update App access settings; Space authority controls origins/ceilings |
 | `lastapp_database_provision` | Allocate managed storage or retry a resource within approved limits |
 | `lastapp_workspace` | Create/archive/retry owned isolated copies; issue PKCE development launch codes |
+| `lastapp_package_read` | Browse package versions, plan or inspect an installation, and find authorized release source |
+| `lastapp_package` | Stage, preview, activate, retry or discard an installation. Archiving or discarding a package preview schedules deletion of its test data. |
 | `lastapp_release` | Issue upload tickets, capture releases, activate previews, explicitly deploy or retry a failed deployment |
 
 Authoritative guides are served through `lastapp_describe` and the same
@@ -266,3 +268,5 @@ closed across that boundary. Failed preparation/activation keeps previous live
 security policies, and restores old gates only for verified compatible layouts.
 Published references to users/teams disabled after publication remain inert when
 copied into a workspace; this never allows a new ordinary grant to inactive users.
+
+See [starter business packages](PACKAGES.md#management-mcp) for the package lifecycle and source downloads.

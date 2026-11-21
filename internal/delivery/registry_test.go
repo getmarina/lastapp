@@ -151,15 +151,15 @@ func TestSnapshotAppQuota(t *testing.T) {
 	for i := range 3 {
 		exec(t, q, "INSERT INTO apps(id,tenant_id,space_id,slug,display_name) VALUES(?,?,?,?,?)", registry.NewID(), tenant, dev, "dev-"+string(rune('a'+i)), "Workspace App")
 	}
-	app := func(id, state string) snapshotApp { return snapshotApp{ID: id, Slug: "s", Name: "n", State: state} }
+	app := func(id, state string) ConfiguredApp { return ConfiguredApp{ID: id, Slug: "s", Name: "n", State: state} }
 	s := &Service{}
-	if e := s.snapshotAppQuota(ctx, q, tenant, spaceSnapshot{Apps: []snapshotApp{app(existing, registry.StateActive), app(registry.NewID(), registry.StateActive)}}); e != nil {
+	if e := s.snapshotAppQuota(ctx, q, tenant, SpaceConfiguration{Apps: []ConfiguredApp{app(existing, registry.StateActive), app(registry.NewID(), registry.StateActive)}}); e != nil {
 		t.Fatalf("workspace Apps counted against the production quota: %v", e)
 	}
-	if e := s.snapshotAppQuota(ctx, q, tenant, spaceSnapshot{Apps: []snapshotApp{app(registry.NewID(), registry.StateActive), app(registry.NewID(), registry.StateActive)}}); apiStatus(e) != 409 {
+	if e := s.snapshotAppQuota(ctx, q, tenant, SpaceConfiguration{Apps: []ConfiguredApp{app(registry.NewID(), registry.StateActive), app(registry.NewID(), registry.StateActive)}}); apiStatus(e) != 409 {
 		t.Fatalf("quota exceeded without conflict: %v", e)
 	}
-	if e := s.snapshotAppQuota(ctx, q, tenant, spaceSnapshot{Apps: []snapshotApp{app(existing, registry.StateArchived), app(registry.NewID(), registry.StateActive), app(registry.NewID(), registry.StateActive)}}); e != nil {
+	if e := s.snapshotAppQuota(ctx, q, tenant, SpaceConfiguration{Apps: []ConfiguredApp{app(existing, registry.StateArchived), app(registry.NewID(), registry.StateActive), app(registry.NewID(), registry.StateActive)}}); e != nil {
 		t.Fatalf("archiving an existing App did not free quota: %v", e)
 	}
 }

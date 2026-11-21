@@ -1,5 +1,49 @@
 # Lastapp verification
 
+## Package review fixes — 21 November 2026
+
+- Disposable MariaDB confirmed objects-only installation and App attachment on
+  Starter, planning rejection when the managed target is disabled, and physical
+  preview database cleanup after the target is re-enabled. A second authorized
+  Space manager reviewed and retried a failed App installation after its private
+  workspace was archived, without gaining access to the undeployed release.
+- The full Go race suite passed. A focused race rerun on the final receipt code covered package, upload,
+  inventory and MCP operations. They verified that upload quota rejection and a
+  failed upload transaction leave no uncommitted artifacts, successful preview
+  and activation no-ops bind their request keys, and source streaming uses a
+  download slot while the MCP authentication pool is free. The attachment unit
+  test distinguishes a newly required field from one supplied by a default.
+- Eight Playwright package, workspace and release tests passed, including the
+  discard confirmation at desktop and mobile widths. Lint, type checks, Go vet,
+  migration parity and pinned-driver verification passed.
+
+## Tenant-installable packages — 21 November 2026
+
+- On disposable MariaDB 12.3, the full Go race/integration suite passed. The
+  package lifecycle fixture published two synthetic versions, installed
+  objects-only and full App packages in different Tenants, bound an explicit
+  dependency via delegated MCP, and attached an App after an entity edit.
+  Existing records and the sibling App revision survived. Coverage also
+  includes stable plan and request replay, ordinary member discovery through
+  role assignments, and retention of referenced artifacts during cleanup.
+- A fault injected into final publication exercised the durable failed step.
+  The original retry was rejected after an intervening production change.
+  Reviewing the new base allowed the same installation to activate.
+- The full browser suite passed all 40 tests. A later focused run passed all
+  five package and development release tests. The package test checked desktop
+  and 390 px review layouts, preview on its App origin, production activation,
+  and retrieval of the registered source.
+- Package contract tests exercised the 64-item bound and rejected an extra
+  item and oversized manifest input. A separate case verified cyclic references
+  and independent destination IDs. The 64-entity
+  decoder and validation fixture averaged 232 µs and 235 KiB allocated per
+  operation on an Apple M4 Max. This measures the decoder and validator.
+  Production throughput and peak memory under concurrent installations remain
+  unmeasured.
+- Go and console lint, TypeScript, Go vet, generated schema parity, and pinned
+  driver integrity passed. [Package guide](PACKAGES.md) records the operator
+  migration and artifact retention procedure.
+
 ## Console UI code rules: tokens only, kit only, 200-line files — 19 November 2026
 
 - `npm run lint` (ESLint plus `scripts/check-css.mjs`) and `npm run

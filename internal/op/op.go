@@ -316,11 +316,17 @@ func agentMutationBegin(ctx context.Context, tx *sql.Tx, a *access.AgentCall) er
 		return registry.Bad("request_key is required for every mutation")
 	}
 	var previous string
-	e := tx.QueryRowContext(ctx, "SELECT input_hash FROM agent_operation_receipts WHERE grant_id=? AND request_key=? FOR UPDATE", a.Grant.ID, a.Key).Scan(&previous)
+	var saved []byte
+	e := tx.QueryRowContext(ctx, "SELECT input_hash,result_json FROM agent_operation_receipts WHERE grant_id=? AND request_key=? FOR UPDATE", a.Grant.ID, a.Key).Scan(&previous, &saved)
 	if e == nil {
 		if previous != a.Hash {
 			return registry.Conflict("request_key was already used for different arguments")
 		}
+		var result registry.Row
+		if e = json.Unmarshal(saved, &result); e != nil {
+			return e
+		}
+		a.ResultRef = result
 		return ErrAgentReplay
 	}
 	if !errors.Is(e, sql.ErrNoRows) {

@@ -53,3 +53,5 @@ func EstimatedRecordBytes(fields []Field) int {
 	}
 	return size
 }
+
+const MaxSpaceEntities = 100

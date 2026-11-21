@@ -32,7 +32,13 @@ const response = await fetch(endpoint, {
     Authorization: `Bearer ${token}`,
     "Content-Type": "application/json",
   },
-  body: JSON.stringify({ entrypoint: "index.html", files }),
+  body: JSON.stringify({
+    entrypoint: "index.html",
+    files,
+    source_zip: process.argv[4]
+      ? (await readFile(process.argv[4])).toString("base64")
+      : undefined,
+  }),
 });
 const result = await response.json();
 if (!response.ok)

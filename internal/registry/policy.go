@@ -92,7 +92,7 @@ func Quota(ctx context.Context, q Queryer, tenant, table string, limit *int64) e
 		state += " AND NOT EXISTS(SELECT 1 FROM spaces sp WHERE sp.id=apps.space_id AND sp.workspace_id IS NOT NULL)"
 	}
 	if table == "database_resources" {
-		state = "1=1"
+		state = "package_preview=0"
 	}
 	if e := q.QueryRowContext(ctx, "SELECT COUNT(*) FROM "+table+" WHERE tenant_id=? AND "+state, tenant).Scan(&n); e != nil {
 		return e

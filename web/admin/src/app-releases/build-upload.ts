@@ -12,7 +12,11 @@ async function encode(file: File) {
 
 // Uploads a build folder through a bounded upload ticket and returns the new
 // build's ID.
-export async function uploadBuild(app: unknown, files: FileList) {
+export async function uploadBuild(
+  app: unknown,
+  files: FileList,
+  source?: File,
+) {
   const ticket = await api<UploadTicket>(
       `/v1/apps/${app}/upload-tickets`,
       "POST",
@@ -25,6 +29,8 @@ export async function uploadBuild(app: unknown, files: FileList) {
     list.reduce((n, f) => n + f.size, 0) > ticket.limits.max_bytes
   )
     throw new Error("The build exceeds the upload limits.");
+  if (source && source.size > ticket.limits.max_source_bytes)
+    throw new Error("The source archive exceeds the upload limit.");
   const content = await Promise.all(
     list.map(async (f) => ({
       path: f.webkitRelativePath.split("/").slice(1).join("/"),
@@ -37,7 +43,11 @@ export async function uploadBuild(app: unknown, files: FileList) {
       Authorization: `Bearer ${ticket.upload_token}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ entrypoint: "index.html", files: content }),
+    body: JSON.stringify({
+      entrypoint: "index.html",
+      files: content,
+      source_zip: source ? await encode(source) : undefined,
+    }),
   });
   const result = await response.json();
   if (!response.ok) throw new Error(result.error?.message || "Upload failed");

@@ -98,8 +98,7 @@ func (s *Server) beginAgentWrite(ctx context.Context, p access.Principal, key st
 	}
 	*a = access.AgentCall{Grant: p.Agent, Permission: permissions, Operation: operation, Key: key, Hash: entity.Hash(registry.Row{"operation": operation, "input": input}), ResultRef: result}
 	var previous string
-	var saved any
-	e := s.DB.QueryRowContext(ctx, "SELECT input_hash,result_json FROM agent_operation_receipts WHERE grant_id=? AND request_key=?", p.Agent.ID, key).Scan(&previous, &saved)
+	e := s.DB.QueryRowContext(ctx, "SELECT input_hash FROM agent_operation_receipts WHERE grant_id=? AND request_key=?", p.Agent.ID, key).Scan(&previous)
 	if e == nil {
 		if previous != a.Hash {
 			return ctx, registry.Conflict("request_key already belongs to different arguments")
